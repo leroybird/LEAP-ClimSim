@@ -6,6 +6,23 @@ from typing import List
 import torch
 from torch import nn, Tensor
 from sympy import Poly, legendre, Symbol, chebyshevt
+from scipy.special import eval_legendre
+
+# From  https://github.com/gaurav71531/mwt-operator/blob/master/models/utils.py
+
+
+def legendreDer(k, x):
+    def _legendre(k, x):
+        return (2*k+1) * eval_legendre(k, x)
+    out = 0
+    for i in np.arange(k-1, -1, -2):
+        out += _legendre(i, x)
+    return out
+
+
+def phi_(phi_c, x, lb=0, ub=1):
+    mask = np.logical_or(x < lb, x > ub) * 1.0
+    return np.polynomial.polynomial.Polynomial(phi_c)(x) * (1-mask)
 
 
 
@@ -60,8 +77,8 @@ class FeedForward(nn.Sequential):
 
 class MWT1d(nn.Module):
     def __init__(self,
-                 ich=256, k=6, alpha=2, c=1,
-                 nCZ=12,
+                 ich=256, k=3, alpha=2,
+                 depth=12,
                  L=0,
                  base='legendre',
                  initializer=None,
@@ -69,20 +86,20 @@ class MWT1d(nn.Module):
         super().__init__()
 
         self.k = k
-        self.c = c
+        self.c = ich
         self.L = L
-        self.nCZ = nCZ
-        self.total_ch = c*k
+        self.depth = depth
+        self.total_ch = ich*k
         self.Lk = nn.Sequential(Rearrange('b c z -> b z c'), nn.Linear(ich, self.total_ch))
 
         self.MWT_CZ = nn.ModuleList(
-            [MWT_CZ1d(k, alpha, L, c, base,
-                      initializer) for _ in range(nCZ)]
+            [MWT_CZ1d(k, alpha, L, ich, base,
+                      initializer) for _ in range(depth)]
         )
        
-        self.ff = nn.ModuleList([FeedForward(self.total_ch) for _ in range(nCZ)])
+        self.ff = nn.ModuleList([FeedForward(self.total_ch) for _ in range(depth)])
 
-        self.rescale = nn.Parameter(torch.ones(nCZ, 1, 1, self.total_ch) * layer_scale)
+        self.rescale = nn.Parameter(torch.ones(depth, 1, 1, self.total_ch) * layer_scale)
        
         self.Lc0 = nn.Sequential(nn.Linear(self.total_ch, ich), Rearrange('b z c -> b c z'))
 
@@ -90,13 +107,10 @@ class MWT1d(nn.Module):
             self.reset_parameters(initializer)
 
     def forward(self, x):
-
-        B, N, ich = x.shape  # (B, N, d)
-        #ns = math.floor(np.log2(N))
-    
+        B, ich, N = x.shape
         x = self.Lk(x)
     
-        for i in range(self.nCZ):
+        for i in range(self.depth):
             x_k = x.view(B, N, self.c, self.k)
             xx = self.MWT_CZ[i](x_k)
             xx = xx.view(B, N, -1)  # collapse c and k
