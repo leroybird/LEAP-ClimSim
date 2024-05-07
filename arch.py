@@ -472,12 +472,22 @@ class Net(nn.Module):
         self.layer_3d = nn.Sequential(Rearrange('b (c z) -> b c z', c=num_3d_in, z=num_vert),
                                       nn.Conv1d(num_3d_in, dim - num_in_2d, kernel_size=1))
         
-        heads = 8
+        heads = dim // 64
         self.rotary_embed = RotaryEmbedding(dim=dim//heads)
-        self.blocks = nn.Sequential(Rearrange('b c z -> b z c'),
-                                    Transformer(dim=dim, depth=depth, dim_head=dim//heads, 
+        
+        layers = []
+        for n in range(depth):
+            layers.extend([Block(dim,),
+                            Rearrange('b c z -> b z c'),
+                           Transformer(dim=dim, depth=1, dim_head=dim//heads, 
                                                 heads=heads, rotary_embed=self.rotary_embed),
-                                    Rearrange('b z c -> b c z'))
+                            Rearrange('b z c -> b c z')])
+            
+        self.blocks = nn.Sequential(*layers)        
+        # self.blocks = nn.Sequential(Rearrange('b c z -> b z c'),
+        #                             Transformer(dim=dim, depth=depth, dim_head=dim//heads, 
+        #                                         heads=heads, rotary_embed=self.rotary_embed),
+        #                             Rearrange('b z c -> b c z'))
         
         
         # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
@@ -524,13 +534,11 @@ class Net(nn.Module):
         #                                 nn.Conv1d(out_3d, num_3d_out*num_vert, 1, groups=num_3d_out),
         #                                 Rearrange('b c h -> b (c h)', h=1))
                                     
-        self.out_3d = nn.Sequential(Block(dim), 
-                                    nn.Conv1d(dim, num_3d_out, 1),
+        self.out_3d = nn.Sequential(nn.Conv1d(dim, num_3d_out, 1),
                                     Rearrange('b c z -> b (c z)'),
                                     nn.Linear(num_3d_out*num_vert, num_3d_out*num_vert,)) 
         
-        self.out_2d = nn.Sequential(Block(dim),
-                                    nn.Conv1d(dim, num_2d_out, 1),
+        self.out_2d = nn.Sequential(nn.Conv1d(dim, num_2d_out, 1),
                                     Reduce('b c z -> b c', 'mean'))
         
     def forward(self, x):
@@ -582,7 +590,27 @@ class Transformer2(nn.Module):
         return x
 
 
-
+class NetMLP(nn.Module):
+    def __init__(self, num_in_2d,  num_3d_in, num_2d_out, num_3d_out,
+                 num_3d_start=6, num_vert=60, depth=12, dim=512):
+        super().__init__()
+        self.num_2d_in = num_in_2d
+        self.num_3d_in = num_3d_in
+        self.num_2d_out = num_2d_out
+        self.num_3d_out = num_3d_out
+        self.num_vert = num_vert
+        self.num_3d_start = num_3d_start
+        
+        layers = [nn.Linear(num_in_2d + num_vert*num_3d_in , dim)]
+        layers += [PreNormResidual(dim, FeedForward(dim)) for _ in range(depth)]
+        layers += [nn.Linear(dim, num_2d_out + num_3d_out*num_vert)]
+        
+        self.layers = nn.Sequential(*layers)
+     
+    def forward(self, x):
+        x, emb_idxs = x
+        return self.layers(x)
+    
 class NetTr(nn.Module):
     def __init__(self, num_in_2d,  num_3d_in, num_2d_out, num_3d_out,
                  num_3d_start=6,
@@ -620,9 +648,11 @@ class NetTr(nn.Module):
         self.var_idxs = torch.cat([var_idxs[0:num_3d_start*num_vert], var_idxs_2d[:num_in_2d], 
                               var_idxs[num_3d_start*num_vert:],
                               var_idxs_2d[num_in_2d:]])
-        
+       
+        self.rotary_embed = RotaryEmbedding(dim=64) 
         # Transformer
-        self.transformer = nn.Transformer(dim, dim_feedforward=4*dim, norm_first=True, batch_first=True)
+        self.transformer = Transformer(dim=dim, depth=depth, dim_head=64,
+                                                heads=dim//64, rotary_embed=self.rotary_embed)
                 
         if use_pos_emb:
             self.pos_emb = nn.Embedding(num_pos_emb, dim)
@@ -650,7 +680,8 @@ class NetTr(nn.Module):
         if self.pos_emb is not None:
             x = x + self.pos_emb(emb_idxs)
         
-        x = self.transformer(x[:, 0:num_in, :], x[:, num_in:, :])
+        x = self.transformer(x)
+        x = x[:, num_in:, :]
         return self.out(x)[:, :, 0]
         
         

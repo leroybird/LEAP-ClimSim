@@ -37,18 +37,6 @@ def cast_tuple(val, length = None):
     return output
 
 # helper classes
-
-def Upsample(dim, dim_out):
-    return nn.ConvTranspose3d(dim, dim_out, (1, 4, 4), (1, 2, 2), (0, 1, 1))
-
-def Downsample(dim, dim_out):
-    return nn.Sequential(
-        Rearrange('b c f (h s1) (w s2) -> b (c s1 s2) f h w', s1 = 2, s2 = 2),
-        nn.Conv3d(dim * 4, dim_out, 1)
-    )
-
-# normalization
-
 class Residual(nn.Module):
     def __init__(self, fn):
         super().__init__()
@@ -61,7 +49,7 @@ class RMSNorm(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.scale = dim ** 0.5
-        self.gamma = nn.Parameter(torch.ones(dim, 1, 1, 1))
+        self.gamma = nn.Parameter(torch.ones(dim, 1,))
 
     def forward(self, x):
         return F.normalize(x, dim = 1) * self.scale * self.gamma
