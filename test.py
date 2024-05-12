@@ -12,10 +12,11 @@ import torch
 #%%
 weightings = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
 #%%
-
+weightings
+#%%
 train_df = pl.read_parquet('/mnt/ssd/kaggle/train2.parquet', n_rows=10_000)
 #%%
-test_df = pl.read_parquet('/mnt/ssd/kaggle/test.parquet', n_rows=100_000)
+test_df = pl.read_parquet('/mnt/ssd/kaggle/test.parquet', columns=['sample_id', 'pbuf_SOLIN', "pbuf_COSZRS", 'cam_in_LANDFRAC', 'state_t_40', 'state_t_55', 'state_t_59'])
 
 #%%
 weighting = weightings.iloc[0, 1:].values.astype(np.float32)
@@ -56,7 +57,7 @@ x = train_df.select(FEAT_COLS).to_numpy()
 # out.shape
 # #%%
 # net.check_emb_idxs(FEAT_COLS, TARGET_COLS).dtypes
-# #%%
+# #%%cam_in_LANDFRAC
 # # Display all rows
 # pd.set_option('display.max_rows', 1000)
 # net.check_emb_idxs(FEAT_COLS, TARGET_COLS).head(1000)
@@ -184,23 +185,80 @@ def plot_pattern_diff(column, df, n, k=384):
         plt.imshow(data_s.T)
 
 #%%
-def plot_pattern_single(column, df, n, k=384):
-    plt.figure(figsize=(12, 12))
-    
-    data_sub = df[column][0:k*n].to_numpy().reshape(n,k)
-
-    data_s = data_sub[:, 100]
-    plt.plot(data_s)
 
 #%%
 plot_pattern('pbuf_SOLIN', test_df, 2, k=384)
 plt.show()
 #%%
-plot_pattern_single('pbuf_COSZRS', test_df, 200, k=384)
+plot_pattern_single('pbuf_COSZRS', test_df, 200, k=1)
 plt.xlim(0.0, 200)
 plt.show()
 #%%
-test_df
+#test_df = test_df.to_pandas()
+test_df.index = test_df['sample_id'].apply(lambda x: int(x.split('_')[1]))
+#%%
+test_df_sub = test_df[0::384]
+#%%
+#test_df_sub = test_df_sub.sort_index()
+#%%
+#%%
+MAX_N = 625000//384
+#%%
+MAX_N
+#%%
+plt.figure(figsize=(20, 20))
+plt.plot(test_df_sub['pbuf_COSZRS'].values)
+plt.grid()
+#%%
+a = (1150-275)/365
+#%%
+5*24/10
+#%%
+365*24/10
 # %%
-test_df
-# %%
+def plot_pattern_single(df, k=384, plt_idxs=1, m=1):    
+    #data_sub = #f[0:len(df) - (len(df) % k)].to_numpy().reshape(-1, k)
+    data_s = df.values[plt_idxs::k]
+    data_s = data_s[::m]
+    print(data_s.shape)
+    print(np.diff(data_s).std(axis=0))
+    plt.plot(data_s)
+#%%
+plt.figure(figsize=(12, 12))
+plot_pattern_single(test_df['pbuf_COSZRS']*10, k=384, plt_idxs=116)
+plt.xlim(0, 876.0)
+#plot_pattern_single(test_df['pbuf_SOLIN']/300, k=384*2, plt_idxs=[500])
+
+#plot_pattern_single(test_df['state_t_59'] - 300, k=384, plt_idxs=116)
+#plot_pattern_single(test_df['state_t_59'] - 280, k=384*2, plt_idxs=[500])
+
+#%%
+1600-650
+#%%
+950
+#%%
+365*((24*6)/7)
+#%%
+test_df['pbuf_COSZRS'].min()
+#%%
+500 % 384
+#%%
+(24*3/7)*5
+#%%
+# plt.xlim(0.0, 100)
+# plt.show()
+#%%
+800/450
+#%%
+total = 365*6
+total
+#%%
+MAX_N = 625000//384
+MAX_N
+#%%
+total/MAX_N
+#%%
+test_df.shape
+#%%
+
+#%%

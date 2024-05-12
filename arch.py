@@ -544,8 +544,8 @@ class Net(nn.Module):
         num_3d_start=6,
         num_vert=60,
         dim=512,
-        depth=4,
-        block=ConvNextBlock2,
+        depth=8,
+        block=UNetDepthOne,
         num_emb=384,
         emb_ch=32,
         use_emb: bool = False,
@@ -576,7 +576,7 @@ class Net(nn.Module):
         )
 
         heads = dim // 64
-        # self.rotary_embed = RotaryEmbedding(dim=dim//heads)
+        self.rotary_embed = RotaryEmbedding(dim=dim//heads)
 
         # layers = []
         # for n in range(depth):
@@ -585,13 +585,15 @@ class Net(nn.Module):
         #                    Transformer(dim=dim, depth=1, dim_head=dim//heads,
         #                                         heads=heads, rotary_embed=self.rotary_embed),
         #                     Rearrange('b z c -> b c z')])
-
         # self.blocks = nn.Sequential(*layers)
-        # self.blocks = nn.Sequential(Rearrange('b c z -> b z c'),
-        #                             Transformer(dim=dim, depth=depth, dim_head=dim//heads,
-        #                                         heads=heads, rotary_embed=self.rotary_embed),
-        #                             Rearrange('b z c -> b c z'))
-        self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
+        
+        self.blocks = nn.Sequential(
+            block(dim),
+            Rearrange("b c z -> b z c"),
+            Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+            Rearrange("b z c -> b c z"),
+        )
+        # self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
 
         # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
         # layers = [conv_down(num_2d_3d + num_3d_in, mid_ch//2), nn.GELU(),
@@ -644,7 +646,8 @@ class Net(nn.Module):
             ),
         )
 
-        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
+        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), 
+                                    Reduce("b c z -> b c", "mean"))
 
     def forward(self, x):
         x, emb_idxs = x
