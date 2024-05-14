@@ -251,10 +251,11 @@ class PixelShuffle1D(nn.Module):
 
 
 class UNetDepthOne(nn.Module):
-    def __init__(self, dim, mult=2, block=ConvNextBlock2, scale_factor=2):
+    def __init__(self, dim, mult=2, num_out=None, block=ConvNextBlock2, scale_factor=2):
         super().__init__()
         self.first = block(dim)
-
+        if num_out is None:
+            num_out = dim
         # if dim != dim_in:
         #     self.lin = nn.Conv1d(dim_in, dim, 1)
         # else:
@@ -266,8 +267,9 @@ class UNetDepthOne(nn.Module):
 
         self.final = nn.Sequential(
             ConvNextBlock2(dim * 2, mult=2),
-            nn.Conv1d(dim * 2, dim, 1, groups=dim),
+            nn.Conv1d(dim * 2, num_out, 1),
         )
+        self.lin = nn.Conv1d(dim, num_out, 1) if dim != num_out else nn.Identity()
 
     def forward(self, x_in):
         x1 = self.first(x_in)
@@ -276,7 +278,7 @@ class UNetDepthOne(nn.Module):
         x = self.up(x)
         x = torch.cat([x, x1], dim=1)
         x = self.final(x)
-        return x + x_in
+        return x + self.lin(x_in)
 
 
 class RMSNorm(nn.Module):
@@ -541,6 +543,7 @@ class Net(nn.Module):
         num_3d_in,
         num_2d_out,
         num_3d_out,
+        num_static=5,
         num_3d_start=6,
         num_vert=60,
         dim=512,
@@ -553,7 +556,8 @@ class Net(nn.Module):
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
-
+        self.num_static = num_static
+        num_in_2d = num_in_2d + num_static
         if use_emb:
             self.embedding = nn.Embedding(num_emb, emb_ch)
             num_in_2d += emb_ch
@@ -566,17 +570,23 @@ class Net(nn.Module):
         self.num_vert = num_vert
         self.frac_idxs = frac_idxs
         self.num_3d_start = num_3d_start
+
         self.layer_2d_3d = nn.Sequential(
-            nn.Conv1d(num_in_2d, num_in_2d * num_vert, kernel_size=1, groups=num_in_2d),
-            Rearrange("b (c z) x -> b c (z x)", c=num_in_2d, z=num_vert, x=1),
+            nn.Conv2d(num_in_2d, num_in_2d * num_vert, kernel_size=(1, 2), groups=num_in_2d),
+            Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d, z=num_vert, x=1, k=1),
         )
 
         self.layer_3d = nn.Sequential(
-            Rearrange("b (c z) -> b c z", c=num_3d_in, z=num_vert), nn.Conv1d(num_3d_in, dim - num_in_2d, kernel_size=1)
+            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+            nn.Conv2d(
+                num_3d_in,
+                dim - num_in_2d,
+                kernel_size=(1, 2),
+            ),
         )
 
         heads = dim // 64
-        self.rotary_embed = RotaryEmbedding(dim=dim//heads)
+        self.rotary_embed = RotaryEmbedding(dim=dim // heads)
 
         # layers = []
         # for n in range(depth):
@@ -586,9 +596,9 @@ class Net(nn.Module):
         #                                         heads=heads, rotary_embed=self.rotary_embed),
         #                     Rearrange('b z c -> b c z')])
         # self.blocks = nn.Sequential(*layers)
-        
+
         self.blocks = nn.Sequential(
-            block(dim),
+            UNetDepthOne(dim, num_out=dim),
             Rearrange("b c z -> b z c"),
             Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
             Rearrange("b z c -> b c z"),
@@ -646,24 +656,28 @@ class Net(nn.Module):
             ),
         )
 
-        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), 
-                                    Reduce("b c z -> b c", "mean"))
+        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
 
     def forward(self, x):
-        x, emb_idxs = x
+        # create a time dim
+        x = torch.stack(x.split(x.shape[1] // 2, dim=1), dim=-1)
 
         split_idx = self.num_3d_start * self.num_vert
 
-        # Data contains 3d vars, 2d vars, then 3d vars again
-        x_3d, x_2d = x[:, :split_idx], x[:, split_idx:]
-        x_3d_pt2, x_2d = x_2d[:, self.num_2d_in :], x_2d[:, : self.num_2d_in]
-        x_3d_pt2 = torch.cat([x_3d, x_3d_pt2], dim=1)
+        # Data contains 1d vars, point vars, then 1d, then static vars...
+        x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
 
-        if self.embedding is not None:
-            x_emb = self.embedding(emb_idxs)
-            x_2d = torch.cat([x_2d, x_emb], dim=1)
+        x_1d_2, x_point = x_point[:, self.num_2d_in :], x_point[:, : self.num_2d_in]
+        x_1d_2, x_point_2 = x_1d_2[:, : -self.num_static], x_1d_2[:, -self.num_static :]
 
-        x_out = torch.cat([self.layer_2d_3d(x_2d[..., None]), self.layer_3d(x_3d_pt2)], dim=1)
+        x_1d_2 = torch.cat([x_1d, x_1d_2], dim=1)
+        x_point = torch.cat([x_point, x_point_2], dim=1)[:, :, None, :]
+
+        # if self.embedding is not None:
+        #     x_emb = self.embedding(emb_idxs)
+        #     x_2d = torch.cat([x_2d, x_emb], dim=1)
+
+        x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d_2).squeeze()], dim=1)
         x_out = self.blocks(x_out)
 
         out_3d = self.out_3d(x_out)
@@ -674,7 +688,7 @@ class Net(nn.Module):
         if self.frac_idxs is not None:
             s, e = self.frac_idxs
 
-            out_frac = out_3d[:, s:e] * x_3d[:, s:e]
+            out_frac = out_3d[:, s:e] * x_1d[:, s:e]
             out_3d[:, s:e] = out_frac
 
         out_2d = self.out_2d(x_out)

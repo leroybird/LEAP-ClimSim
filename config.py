@@ -10,9 +10,13 @@ class LoaderConfig(BaseModel):
     weights_path: str = "/mnt/ssd/kaggle/sample_submission.csv"
     train_kaggle_path: str = "/mnt/ssd/kaggle/train2.parquet"
 
+    x_stats_path: str = "x_stats8.json"
+
     num_workers: int = 24
     seed: int = 42
     sample_size: int = 16
+    
+    batch_size : int = 64
 
 
 class DataConfig(BaseModel):

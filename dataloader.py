@@ -1,16 +1,34 @@
+from re import I
+import torch
 from pathlib import Path
 import xarray as xr
 import dataloader
-from torch.utils.data import IterableDataset
 import numpy as np
 import pandas as pd
-import torch
+import config
+import logging
+import polars as pl
+
+import norm
 
 
 class LeapLoader:
-    def __init__(self, root_folder: Path, grid_info_path, df, stats_path=None):
+    def __init__(
+        self,
+        root_folder: Path,
+        grid_info_path,
+        df,
+        x_transform=None,
+        y_transform=None,
+        add_static=True,
+        muti_step=True,
+    ):
         self.root_folder = root_folder
         self.df = df
+        self.x_transform = x_transform
+        self.y_transform = y_transform
+        self.add_static = add_static
+        self.multi_step = muti_step
 
         self.data_path = None
         self.input_vars = []
@@ -138,7 +156,7 @@ class LeapLoader:
             "cam_in_ICEFRAC",
             "cam_in_LANDFRAC",
             "cam_in_OCNFRAC",
-            #"cam_in_SNOWHICE",
+            # "cam_in_SNOWHICE",
             "cam_in_SNOWHLAND",
             "pbuf_ozone",  # outside of the upper troposphere lower stratosphere (UTLS, corresponding to indices 5-21), variance in minimal for these last 3
             "pbuf_CH4",
@@ -283,13 +301,7 @@ class LeapLoader:
 
         self.model_names = []
         self.metrics_names = []
-        self.metrics_dict = {
-            "MAE": self.calc_MAE,
-            "RMSE": self.calc_RMSE,
-            "R2": self.calc_R2,
-            "CRPS": self.calc_CRPS,
-            "bias": self.calc_bias,
-        }
+
         self.num_CRPS = 32
 
         self.set_to_v2_vars()
@@ -352,418 +364,165 @@ class LeapLoader:
     def __len__(self):
         return len(self.df)
 
-    def __getitem__(self, idx):
+    def get_data(self, idx, key="path"):
         row = self.df.iloc[idx]
-        ds_input, ds_target = self.get_pair(self.root_folder / row["path"])
+        if key == "path":
+            ds_input, ds_target = self.get_pair(self.root_folder / row[key])
+        else:
+            ds_input = self.get_input(self.root_folder / row[key])
+            ds_target = None
 
         # # normalization, scaling
         # if self.normalize:
         #     ds_input = (ds_input - self.input_mean) / (self.input_max - self.input_min)
         #     ds_target = ds_target * self.output_scale
         # else:
+
+        lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
+        lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
+        lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
+        area = self.grid_info["area_wgt"].values
+
         ds_input = ds_input.drop(["lat", "lon"])
 
         # stack
         # ds = ds.stack({'batch':{'sample','ncol'}})
         ds_input = ds_input.stack({"batch": {"ncol"}})
-        ds_input = ds_input.to_stacked_array("mlvar", sample_dims=["batch"], name="mli")
+        ds_input = ds_input.to_stacked_array("mlvar", sample_dims=["batch"], name="mli").values
 
         # dso = dso.stack({'batch':{'sample','ncol'}})
-        ds_target = ds_target.stack({"batch": {"ncol"}})
-        ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo")
+        if ds_target is not None:
+            ds_target = ds_target.stack({"batch": {"ncol"}})
+            ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo").values
+
+        if self.add_static:
+            lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
+            lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
+            lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
+            area = 10 * (self.grid_info["area_wgt"].values - 1.0)
+
+            static_data = np.stack([lon1, lon2, lat1, lat2, area], axis=1)
+            ds_input = np.concatenate([ds_input, static_data], axis=1)
+
+        if self.x_transform:
+            ds_input = self.x_transform(ds_input)
+        if self.y_transform and ds_target is not None:
+            ds_target = self.y_transform(ds_target)
 
         return ds_input, ds_target
 
-    def load_ncdata_with_generator(self, data_split):
-        """
-        This function works as a dataloader when training the emulator with raw netCDF files.
-        This can be used as a dataloader during training or it can be used to create entire datasets.
-        When used as a dataloader for training, I/O can slow down training considerably.
-        This function also normalizes the data.
-        mli corresponds to input
-        mlo corresponds to target
-        """
-        filelist = self.get_filelist(data_split)
-
-        def gen():
-            for file in filelist:
-                # read inputs
-                # ds_input = self.get_input(file)
-                # read targets
-                ds_input, ds_target = self.get_pair(file)
-
-                # normalization, scaling
-                if self.normalize:
-                    ds_input = (ds_input - self.input_mean) / (self.input_max - self.input_min)
-                    ds_target = ds_target * self.output_scale
-                else:
-                    ds_input = ds_input.drop(["lat", "lon"])
-
-                # stack
-                # ds = ds.stack({'batch':{'sample','ncol'}})
-                ds_input = ds_input.stack({"batch": {"ncol"}})
-                ds_input = ds_input.to_stacked_array("mlvar", sample_dims=["batch"], name="mli")
-                # dso = dso.stack({'batch':{'sample','ncol'}})
-                ds_target = ds_target.stack({"batch": {"ncol"}})
-                ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo")
-                yield (ds_input.values, ds_target.values)
-
-            class IterableTorchDataset(self.torch.utils.data.IterableDataset):
-                def __init__(this_self, data_generator, output_types, output_shapes):
-                    this_self.data_generator = data_generator
-                    this_self.output_types = output_types
-                    this_self.output_shapes = output_shapes
-
-                def __iter__(this_self):
-                    for item in this_self.data_generator:
-
-                        input_array = self.torch.tensor(item[0], dtype=this_self.output_types[0])
-                        target_array = self.torch.tensor(item[1], dtype=this_self.output_types[1])
-
-                        # Assert final dimensions are correct.
-                        assert input_array.shape[-1] == this_self.output_shapes[0][-1]
-                        assert target_array.shape[-1] == this_self.output_shapes[1][-1]
-
-                        yield (input_array, target_array)
-
-                def as_numpy_iterator(this_self):
-                    for item in this_self.data_generator:
-
-                        # Convert item to numpy array
-                        input_array = np.array(item[0])
-                        target_array = np.array(item[1])
-
-                        # Assert final dimensions are correct.
-                        assert input_array.shape[-1] == this_self.output_shapes[0][-1]
-                        assert target_array.shape[-1] == this_self.output_shapes[1][-1]
-
-                        yield (input_array, target_array)
-
-            dataset = IterableTorchDataset(
-                gen(),
-                (self.torch.float64, self.torch.float64),
-                ((None, self.input_feature_len), (None, self.target_feature_len)),
-            )
-
-            return dataset
-
-    def save_as_npy(self, data_split, save_path="", save_latlontime_dict=False):
-        """
-        This function saves the training data as a .npy file.
-        """
-        data_loader = self.load_ncdata_with_generator(data_split)
-        npy_iterator = list(data_loader.as_numpy_iterator())
-        npy_input = np.concatenate([npy_iterator[x][0] for x in range(len(npy_iterator))])
-        npy_target = np.concatenate([npy_iterator[x][1] for x in range(len(npy_iterator))])
-        with open(save_path + data_split + "_input.npy", "wb") as f:
-            np.save(f, np.float32(npy_input))
-        with open(save_path + data_split + "_target.npy", "wb") as f:
-            np.save(f, np.float32(npy_target))
-        if data_split == "train":
-            data_files = self.train_filelist
-        elif data_split == "val":
-            data_files = self.val_filelist
-        elif data_split == "scoring":
-            data_files = self.scoring_filelist
-        elif data_split == "test":
-            data_files = self.test_filelist
-        if save_latlontime_dict:
-            dates = [re.sub("^.*mli\.", "", x) for x in data_files]
-            dates = [re.sub("\.nc$", "", x) for x in dates]
-            repeat_dates = []
-            for date in dates:
-                for i in range(self.num_latlon):
-                    repeat_dates.append(date)
-            latlontime = {
-                i: [
-                    (self.grid_info["lat"].values[i % self.num_latlon], self.grid_info["lon"].values[i % self.num_latlon]),
-                    repeat_dates[i],
-                ]
-                for i in range(npy_input.shape[0])
-            }
-            with open(save_path + data_split + "_indextolatlontime.pkl", "wb") as f:
-                pickle.dump(latlontime, f)
-
-    def calc_MAE(self, pred, target, avg_grid=True):
-        """
-        calculate 'globally averaged' mean absolute error
-        for vertically-resolved variables, shape should be time x grid x level
-        for scalars, shape should be time x grid
-
-        returns vector of length level or 1
-        """
-        assert pred.shape[1] == self.num_latlon
-        assert pred.shape == target.shape
-        mae = np.abs(pred - target).mean(axis=0)
-        if avg_grid:
-            return mae.mean(axis=0)  # we decided to average globally at end
+    def __getitem__(self, idx):
+        if self.multi_step:
+            x0, _ = self.get_data(idx, key="prev_path")
+            x1, y = self.get_data(idx, key="path")
+            return np.concatenate([x0, x1], axis=1), y
         else:
-            return mae
+            return self.get_data(idx)
 
-    def calc_RMSE(self, pred, target, avg_grid=True):
-        """
-        calculate 'globally averaged' root mean squared error
-        for vertically-resolved variables, shape should be time x grid x level
-        for scalars, shape should be time x grid
 
-        returns vector of length level or 1
-        """
-        assert pred.shape[1] == self.num_latlon
-        assert pred.shape == target.shape
-        sq_diff = (pred - target) ** 2
-        rmse = np.sqrt(sq_diff.mean(axis=0))  # mean over time
-        if avg_grid:
-            return rmse.mean(axis=0)  # we decided to separately average globally at end
+def get_idxs(num, num_workers, seed=42):
+    idxs = np.arange(num)
+    np.random.seed(seed)
+    idxs = np.random.permutation(idxs)[0 : num - num % num_workers]
+    idxs = np.array_split(idxs, num_workers)
+    return idxs
+
+
+class IterableDataset(torch.utils.data.IterableDataset):
+    def __init__(self, inner_ds, num_workers=24, seed=42, sample_size=16):
+        self.num_workers = num_workers
+        self.total_iterations = -1
+        self.seed = seed
+        self.inner_ds = inner_ds
+        self.num_samples = len(inner_ds)
+        self.sample_size = sample_size
+        self.grid_points = 384
+        assert self.grid_points % self.sample_size == 0
+        self.inner_rep = self.grid_points // self.sample_size
+
+    def gen(
+        self,
+    ):
+        self.total_iterations += 1
+        worker_info = torch.utils.data.get_worker_info()
+
+        if worker_info is None:
+            logging.warning("No worker info")
+            iter_idx = 0
         else:
-            return rmse
+            iter_idx = worker_info.id
 
-    def calc_R2(self, pred, target, avg_grid=True):
-        """
-        calculate 'globally averaged' R-squared
-        for vertically-resolved variables, input shape should be time x grid x level
-        for scalars, input shape should be time x grid
+        idxs = get_idxs(len(self.inner_ds), self.num_workers, self.seed + self.total_iterations)
 
-        returns vector of length level or 1
-        """
-        assert pred.shape[1] == self.num_latlon
-        assert pred.shape == target.shape
-        sq_diff = (pred - target) ** 2
-        tss_time = (target - target.mean(axis=0)[np.newaxis, ...]) ** 2  # mean over time
-        r_squared = 1 - sq_diff.sum(axis=0) / tss_time.sum(axis=0)  # sum over time
-        if avg_grid:
-            return r_squared.mean(axis=0)  # we decided to separately average globally at end
-        else:
-            return r_squared
+        for idx in idxs[iter_idx]:
+            # Each inner dataset contains 384 unique grid points
+            ds_x_inner, ds_y_inner = self.inner_ds[idx]
+            # ds_x_inner = ds_x_inner.values
+            # ds_y_inner = ds_y_inner.values
 
-    def calc_bias(self, pred, target, avg_grid=True):
-        """
-        calculate bias
-        for vertically-resolved variables, input shape should be time x grid x level
-        for scalars, input shape should be time x grid
+            random_sample = np.random.permutation(self.grid_points)
+            for n in range(self.inner_rep):
+                ds_x = ds_x_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
+                ds_y = ds_y_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
+                yield ds_x, ds_y
 
-        returns vector of length level or 1
-        """
-        assert pred.shape[1] == self.num_latlon
-        assert pred.shape == target.shape
-        bias = pred.mean(axis=0) - target.mean(axis=0)
-        if avg_grid:
-            return bias.mean(axis=0)  # we decided to separately average globally at end
-        else:
-            return bias
+    def __iter__(self):
+        return self.gen()
 
-    def calc_CRPS(self, samplepreds, target, avg_grid=True):
-        """
-        calculate 'globally averaged' continuous ranked probability score
-        for vertically-resolved variables, input shape should be time x grid x level x num_crps_samples
-        for scalars, input shape should be time x grid x num_crps_samples
 
-        returns vector of length level or 1
-        """
-        assert samplepreds.shape[1] == self.num_latlon
-        assert len(samplepreds.shape) == len(target.shape) + 1
-        assert len(samplepreds.shape) == 3 or len(samplepreds.shape) == 4
-        num_crps = samplepreds.shape[-1]
-        mae = np.mean(np.abs(samplepreds - target[..., np.newaxis]), axis=(0, -1))  # mean over time and crps samples
-        samplepreds = np.sort(samplepreds, axis=-1)
-        diff = samplepreds[..., 1:] - samplepreds[..., :-1]
-        count = np.arange(1, num_crps) * np.arange(num_crps - 1, 0, -1)
-        if len(samplepreds.shape) == 4:
-            spread = (
-                (diff * count[np.newaxis, np.newaxis, np.newaxis, :]).sum(axis=-1).mean(axis=0)
-            )  # sum over crps samples and mean over time
-        elif len(samplepreds.shape) == 3:
-            spread = (
-                (diff * count[np.newaxis, np.newaxis, :]).sum(axis=-1).mean(axis=0)
-            )  # sum over crps samples and mean over time
-        crps = mae - spread / (num_crps * (num_crps - 1))
-        # count was not multiplied by two so no need to divide by two
-        if avg_grid:
-            return crps.mean(axis=0)  # we decided to separately average globally at end
-        else:
-            return crps
+def concat_collate(batch):
+    x = [torch.from_numpy(b[0]) for b in batch]
+    y = [torch.from_numpy(b[1]) for b in batch]
+    x = torch.cat(x, dim=0)
+    y = torch.cat(y, dim=0)
+    return x, y
 
-    def create_metrics_df(self, data_split):
-        """
-        creates a dataframe of metrics for each model
-        """
-        assert data_split in [
-            "train",
-            "val",
-            "scoring",
-            "test",
-        ], "Provided data_split is not valid. Available options are train, val, scoring, and test."
-        assert len(self.model_names) != 0
-        assert len(self.metrics_names) != 0
-        assert len(self.target_vars) != 0
-        assert self.target_feature_len is not None
 
-        if data_split == "train":
-            assert len(self.preds_weighted_train) != 0
-            assert len(self.target_weighted_train) != 0
-            for model_name in self.model_names:
-                df_var = pd.DataFrame(columns=self.metrics_names, index=self.target_vars)
-                df_var.index.name = "variable"
-                df_idx = pd.DataFrame(columns=self.metrics_names, index=range(self.target_feature_len))
-                df_idx.index.name = "output_idx"
-                for metric_name in self.metrics_names:
-                    current_idx = 0
-                    for target_var in self.target_vars:
-                        metric = self.metrics_dict[metric_name](
-                            self.preds_weighted_train[model_name][target_var], self.target_weighted_train[target_var]
-                        )
-                        df_var.loc[target_var, metric_name] = np.mean(metric)
-                        df_idx.loc[current_idx : current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
-                        current_idx += self.var_lens[target_var]
-                self.metrics_var_train[model_name] = df_var
-                self.metrics_idx_train[model_name] = df_idx
+def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
+    x_norm, y_norm = norm.get_stats(loader_cfg, data_cfg)
 
-        elif data_split == "val":
-            assert len(self.preds_weighted_val) != 0
-            assert len(self.target_weighted_val) != 0
-            for model_name in self.model_names:
-                df_var = pd.DataFrame(columns=self.metrics_names, index=self.target_vars)
-                df_var.index.name = "variable"
-                df_idx = pd.DataFrame(columns=self.metrics_names, index=range(self.target_feature_len))
-                df_idx.index.name = "output_idx"
-                for metric_name in self.metrics_names:
-                    current_idx = 0
-                    for target_var in self.target_vars:
-                        metric = self.metrics_dict[metric_name](
-                            self.preds_weighted_val[model_name][target_var], self.target_weighted_val[target_var]
-                        )
-                        df_var.loc[target_var, metric_name] = np.mean(metric)
-                        df_idx.loc[current_idx : current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
-                        current_idx += self.var_lens[target_var]
-                self.metrics_var_val[model_name] = df_var
-                self.metrics_idx_val[model_name] = df_idx
+    df_index = pd.read_parquet(loader_cfg.index_path)
 
-        elif data_split == "scoring":
-            assert len(self.preds_weighted_scoring) != 0
-            assert len(self.target_weighted_scoring) != 0
-            for model_name in self.model_names:
-                df_var = pd.DataFrame(columns=self.metrics_names, index=self.target_vars)
-                df_var.index.name = "variable"
-                df_idx = pd.DataFrame(columns=self.metrics_names, index=range(self.target_feature_len))
-                df_idx.index.name = "output_idx"
-                for metric_name in self.metrics_names:
-                    current_idx = 0
-                    for target_var in self.target_vars:
-                        metric = self.metrics_dict[metric_name](
-                            self.preds_weighted_scoring[model_name][target_var], self.target_weighted_scoring[target_var]
-                        )
-                        df_var.loc[target_var, metric_name] = np.mean(metric)
-                        df_idx.loc[current_idx : current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
-                        current_idx += self.var_lens[target_var]
-                self.metrics_var_scoring[model_name] = df_var
-                self.metrics_idx_scoring[model_name] = df_idx
+    df_index_tr = df_index[df_index["year"] <= 8]
+    df_index_val = df_index[df_index["year"] == 9]
 
-        elif data_split == "test":
-            assert len(self.preds_weighted_test) != 0
-            assert len(self.target_weighted_test) != 0
-            for model_name in self.model_names:
-                df_var = pd.DataFrame(columns=self.metrics_names, index=self.target_vars)
-                df_var.index.name = "variable"
-                df_idx = pd.DataFrame(columns=self.metrics_names, index=range(self.target_feature_len))
-                df_idx.index.name = "output_idx"
-                for metric_name in self.metrics_names:
-                    current_idx = 0
-                    for target_var in self.target_vars:
-                        metric = self.metrics_dict[metric_name](
-                            self.preds_weighted_test[model_name][target_var], self.target_weighted_test[target_var]
-                        )
-                        df_var.loc[target_var, metric_name] = np.mean(metric)
-                        df_idx.loc[current_idx : current_idx + self.var_lens[target_var] - 1, metric_name] = np.atleast_1d(metric)
-                        current_idx += self.var_lens[target_var]
-                self.metrics_var_test[model_name] = df_var
-                self.metrics_idx_test[model_name] = df_idx
+    assert len(df_index) == len(df_index_tr) + len(df_index_val)
 
-    def reshape_daily(self, output):
-        """
-        This function returns two numpy arrays, one for each vertically resolved variable (ptend_t and ptend_q0001).
-        Dimensions of expected input are num_samples by 128 (number of target features).
-        Output argument is espected to be have dimensions of num_samples by features.
-        ptend_t is expected to be the first feature, and ptend_q0001 is expected to be the second feature.
-        Data is expected to use a stride_sample of 6. (12 samples per day, 20 min timestep).
-        """
-        num_samples = output.shape[0]
-        ptend_t = output[:, :60].reshape((int(num_samples / self.num_latlon), self.num_latlon, 60))
-        ptend_q0001 = output[:, 60:120].reshape((int(num_samples / self.num_latlon), self.num_latlon, 60))
-        ptend_t_daily = np.mean(
-            ptend_t.reshape((ptend_t.shape[0] // 12, 12, self.num_latlon, 60)), axis=1
-        )  # Nday x lotlonnum x 60
-        ptend_q0001_daily = np.mean(
-            ptend_q0001.reshape((ptend_q0001.shape[0] // 12, 12, self.num_latlon, 60)), axis=1
-        )  # Nday x lotlonnum x 60
-        ptend_t_daily_long = []
-        ptend_q0001_daily_long = []
-        for i in range(len(self.lats)):
-            ptend_t_daily_long.append(np.mean(ptend_t_daily[:, self.lat_indices_list[i], :], axis=1))
-            ptend_q0001_daily_long.append(np.mean(ptend_q0001_daily[:, self.lat_indices_list[i], :], axis=1))
-        ptend_t_daily_long = np.array(ptend_t_daily_long)  # lat x Nday x 60
-        ptend_q0001_daily_long = np.array(ptend_q0001_daily_long)  # lat x Nday x 60
-        return ptend_t_daily_long, ptend_q0001_daily_long
+    inner_train_ds = LeapLoader(
+        root_folder=Path(loader_cfg.root_folder),
+        grid_info_path=loader_cfg.grid_info_path,
+        df=df_index_tr,
+        x_transform=x_norm,
+        y_transform=y_norm,
+    )
 
-    def plot_r2_analysis(self, pressure_grid_plotting, save_path=""):
-        """
-        This function plots the R2 pressure latitude figure shown in the SI.
-        """
-        self.set_plot_params()
-        n_model = len(self.model_names)
-        fig, ax = plt.subplots(2, n_model, figsize=(n_model * 12, 18))
-        y = np.array(range(60))
-        X, Y = np.meshgrid(np.sin(self.lats * np.pi / 180), y)
-        Y = pressure_grid_plotting / 100
-        test_heat_daily_long, test_moist_daily_long = self.reshape_daily(self.target_scoring)
-        for i, model_name in enumerate(self.model_names):
-            pred_heat_daily_long, pred_moist_daily_long = self.reshape_daily(self.preds_scoring[model_name])
-            coeff = 1 - np.sum((pred_heat_daily_long - test_heat_daily_long) ** 2, axis=1) / np.sum(
-                (test_heat_daily_long - np.mean(test_heat_daily_long, axis=1)[:, None, :]) ** 2, axis=1
-            )
-            coeff = coeff[self.sort_lat_key, :]
-            coeff = coeff.T
+    train_ds = IterableDataset(inner_train_ds, num_workers=24)
+    train_dl = torch.utils.data.DataLoader(
+        train_ds,
+        num_workers=24,
+        batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+        collate_fn=concat_collate,
+        pin_memory=True,
+    )
 
-            contour_plot = ax[0, i].pcolor(X, Y, coeff, cmap="Blues", vmin=0, vmax=1)  # pcolormesh
-            ax[0, i].contour(X, Y, coeff, [0.7], colors="orange", linewidths=[4])
-            ax[0, i].contour(X, Y, coeff, [0.9], colors="yellow", linewidths=[4])
-            ax[0, i].set_ylim(ax[0, i].get_ylim()[::-1])
-            ax[0, i].set_title(self.model_names[i] + " - ptend_t")
-            ax[0, i].set_xticks([])
+    x, y = next(iter(train_dl))
+    print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
 
-            coeff = 1 - np.sum((pred_moist_daily_long - test_moist_daily_long) ** 2, axis=1) / np.sum(
-                (test_moist_daily_long - np.mean(test_moist_daily_long, axis=1)[:, None, :]) ** 2, axis=1
-            )
-            coeff = coeff[self.sort_lat_key, :]
-            coeff = coeff.T
+    valid_ds = LeapLoader(
+        root_folder=Path(loader_cfg.root_folder),
+        grid_info_path=loader_cfg.grid_info_path,
+        df=df_index_val,
+        x_transform=x_norm,
+        y_transform=y_norm,
+    )
 
-            contour_plot = ax[1, i].pcolor(X, Y, coeff, cmap="Blues", vmin=0, vmax=1)  # pcolormesh
-            ax[1, i].contour(X, Y, coeff, [0.7], colors="orange", linewidths=[4])
-            ax[1, i].contour(X, Y, coeff, [0.9], colors="yellow", linewidths=[4])
-            ax[1, i].set_ylim(ax[1, i].get_ylim()[::-1])
-            ax[1, i].set_title(self.model_names[i] + " - ptend_q0001")
-            ax[1, i].xaxis.set_ticks([np.sin(-50 / 180 * np.pi), 0, np.sin(50 / 180 * np.pi)])
-            ax[1, i].xaxis.set_ticklabels(["50$^\circ$S", "0$^\circ$", "50$^\circ$N"])
-            ax[1, i].xaxis.set_tick_params(width=2)
+    # effective batch size -> 384
+    valid_loader = torch.utils.data.DataLoader(
+        valid_ds,
+        num_workers=12,
+        batch_size=1,
+        collate_fn=concat_collate,
+        pin_memory=True,
+    )
 
-            if i != 0:
-                ax[0, i].set_yticks([])
-                ax[1, i].set_yticks([])
-
-        # lines below for x and y label axes are valid if 3 models are considered
-        # we want to put only one label for each axis
-        # if nbr of models is different from 3 please adjust label location to center it
-
-        # ax[1,1].xaxis.set_label_coords(-0.10,-0.10)
-
-        ax[0, 0].set_ylabel("Pressure [hPa]")
-        ax[0, 0].yaxis.set_label_coords(-0.2, -0.09)  # (-1.38,-0.09)
-        ax[0, 0].yaxis.set_ticks([1000, 800, 600, 400, 200, 0])
-        ax[1, 0].yaxis.set_ticks([1000, 800, 600, 400, 200, 0])
-
-        fig.subplots_adjust(right=0.8)
-        cbar_ax = fig.add_axes([0.82, 0.12, 0.02, 0.76])
-        cb = fig.colorbar(contour_plot, cax=cbar_ax)
-        cb.set_label("Skill Score " + r"$\left(\mathrm{R^{2}}\right)$", labelpad=50.1)
-        plt.suptitle("Baseline Models Skill for Vertically Resolved Tendencies", y=0.97)
-        plt.subplots_adjust(hspace=0.13)
-        plt.show()
-        plt.savefig(save_path + "press_lat_diff_models.png", bbox_inches="tight", pad_inches=0.1, dpi=300)
+    return train_dl, valid_loader

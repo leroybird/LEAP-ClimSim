@@ -5,12 +5,12 @@
 import logging
 from pathlib import Path
 
-from arrow import get
 import dataloader
 import pandas as pd
 import numpy as np
 import torch
 import polars as pl
+
 #%%
 df_index = pd.read_parquet('/mnt/ssd/kaggle/index.parquet')
 grid_info_path = '/mnt/storage/kaggle/ClimSim_low-res_grid-info.nc'
@@ -29,6 +29,8 @@ assert len(df_index) == len(df_index_tr) + len(df_index_val)
 #%%
 ds_train = dataloader.LeapLoader(root_folder, grid_info_path, df_index_tr,)
 ds_train
+#%%
+ds_train[0][0][:].std(axis=0)
 #%%
 train_ds_sample
 #%%
