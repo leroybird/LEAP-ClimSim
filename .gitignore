@@ -1,3 +1,6 @@
+wandb
+test_checkpoints/
+lightning_logs/ 
 plots
 models/
 *.pt

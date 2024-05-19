@@ -5,7 +5,7 @@ import polars as pl
 class LoaderConfig(BaseModel):
     index_path: str = "/mnt/ssd/kaggle/index.parquet"
     grid_info_path: str = "/mnt/storage/kaggle/ClimSim_low-res_grid-info.nc"
-    root_folder: str = "/mnt/storage/kaggle/train"
+    root_folder: str = "/mnt/ssd/kaggle/train"
 
     weights_path: str = "/mnt/ssd/kaggle/sample_submission.csv"
     train_kaggle_path: str = "/mnt/ssd/kaggle/train2.parquet"
@@ -15,8 +15,8 @@ class LoaderConfig(BaseModel):
     num_workers: int = 24
     seed: int = 42
     sample_size: int = 16
-    
-    batch_size : int = 64
+
+    batch_size: int = 64
 
 
 class DataConfig(BaseModel):

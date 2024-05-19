@@ -1,3 +1,4 @@
+from ptwt._stationary_transform import _swt
 from collections import namedtuple
 from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
@@ -17,6 +18,12 @@ from torch import Block, nn, Tensor
 from torch.nn import functional as F
 
 from mwt import MWT1d
+from fastkan import FastKAN
+from torch.nn.attention import SDPBackend
+
+# Enable TFfloat32
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -166,6 +173,17 @@ class GRN(nn.Module):
         return self.gamma * (x * Nx) + self.beta + x
 
 
+class GRN_CH_First(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(1, dim, 1))
+        self.beta = nn.Parameter(torch.zeros(1, dim, 1))
+
+    def forward(self, x):
+        Gx = torch.norm(x, p=2, dim=(-1,), keepdim=True)
+        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
+        return self.gamma * (x * Nx) + self.beta + x
+
 class DownSample(nn.Sequential):
     def __init__(self, in_ch, out_ch=None, ks=4):
         if out_ch is None:
@@ -308,6 +326,26 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+class ConvFF(nn.Module):
+    def __init__(self, dim, mult=4):
+        super().__init__()
+        dim_inner = int(dim * mult)
+        self.net = nn.Sequential(
+            RMSNorm(dim),
+            # nn.Linear(dim_inner, dim_inner),
+            Rearrange("b z c -> b c z"),
+            nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
+            nn.GELU(),
+            GRN_CH_First(dim_inner),
+            nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
+            Rearrange("b c z -> b z c"),
+            # nn.Linear(dim_inner, dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 FlashAttentionConfig = namedtuple("FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"])
 
 
@@ -344,7 +382,8 @@ class Attend(nn.Module):
         # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
         # print(q.shape, k.shape, v.shape)
 
-        with torch.backends.cuda.sdp_kernel(**config._asdict()):
+        with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
+            # with torch.backends.cuda.sdp_kernel(**config._asdict()):
             out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
 
         return out
@@ -410,7 +449,8 @@ class Transformer(nn.Module):
         ff_mult=4,
         norm_output=True,
         rotary_embed=None,
-        flash_attn=True
+        flash_attn=True,
+        use_khan=False,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -427,7 +467,8 @@ class Transformer(nn.Module):
                             rotary_embed=rotary_embed,
                             flash=flash_attn,
                         ),
-                        FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
+                        ConvFF(dim, mult=ff_mult),
+                        # FastKAN([dim, dim]) if use_khan else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
                     ]
                 )
             )
@@ -536,6 +577,24 @@ class UnetConvnext(nn.Module):
         return out
 
 
+def wavelet_transform(x, wavelet="db6", levels=3):
+    return torch.concatenate(_swt(x, wavelet, levels, axis=1) + [x], dim=-1)
+
+
+class WaveLetBlock(nn.Module):
+    def __init__(self, dim, wavelet="db6", levels=2):
+        super().__init__()
+        self.wavelet = wavelet
+        self.levels = levels
+        # fac = 4
+        # assert dim % fac == 0
+        # self.lin = nn.Conv1d(dim, dim // fac, 1)
+
+    def forward(self, x):
+        # x = self.lin(x)
+        return wavelet_transform(x, self.wavelet, self.levels)
+
+
 class Net(nn.Module):
     def __init__(
         self,
@@ -547,12 +606,13 @@ class Net(nn.Module):
         num_3d_start=6,
         num_vert=60,
         dim=512,
-        depth=8,
-        block=UNetDepthOne,
+        depth=6,
+        block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
         use_emb: bool = False,
         frac_idxs=None,
+        model_type="transformer",
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
@@ -596,13 +656,21 @@ class Net(nn.Module):
         #                                         heads=heads, rotary_embed=self.rotary_embed),
         #                     Rearrange('b z c -> b c z')])
         # self.blocks = nn.Sequential(*layers)
-
-        self.blocks = nn.Sequential(
-            UNetDepthOne(dim, num_out=dim),
-            Rearrange("b c z -> b z c"),
-            Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-            Rearrange("b z c -> b c z"),
-        )
+        if model_type == "transformer":
+            self.blocks = nn.Sequential(
+                # UNetDepthOne(dim, num_out=dim),
+                # WaveLetBlock(dim),
+                Rearrange("b c z -> b z c"),
+                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                Rearrange("b z c -> b c z"),
+            )
+        else:
+            self.blocks = nn.Sequential(
+                # UNetDepthOne(dim, num_out=dim),
+                Rearrange("b c z -> b z c"),
+                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                Rearrange("b z c -> b c z"),
+            )
         # self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
 
         # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
@@ -752,8 +820,8 @@ class NetTr(nn.Module):
         num_3d_out,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=4,
+        dim=1024,
+        depth=6,
         num_pos_emb=384,
         use_pos_emb: bool = False,
         frac_idxs=None,
