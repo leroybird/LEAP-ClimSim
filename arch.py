@@ -336,7 +336,7 @@ class ConvFF(nn.Module):
             Rearrange("b z c -> b c z"),
             nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
             nn.GELU(),
-            GRN_CH_First(dim_inner),
+            #GRN_CH_First(dim_inner),
             nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
             Rearrange("b c z -> b z c"),
             # nn.Linear(dim_inner, dim),
