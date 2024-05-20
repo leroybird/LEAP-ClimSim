@@ -87,7 +87,7 @@ class LitModel(L.LightningModule):
         self.val_metrics = [fv.mae, fv.mse, r_squared, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.train_metrics = [fv.mse, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.learning_rate = 1e-3
-        # self.scheduler_steps = 200_000
+        self.scheduler_steps = 1_000_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
