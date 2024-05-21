@@ -20,7 +20,8 @@ from torch.nn import functional as F
 # from mwt import MWT1d
 # from fastkan import FastKAN
 from torch.nn.attention import SDPBackend
-from labml_nn.normalization.deep_norm import DeepNorm
+
+# from labml_nn.normalization.deep_norm import DeepNorm
 
 # Enable TFfloat32
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -329,11 +330,11 @@ class FeedForward(nn.Module):
 
 
 class ConvFF(nn.Module):
-    def __init__(self, dim, mult=4):
+    def __init__(self, dim, mult=4, norm=False):
         super().__init__()
         dim_inner = int(dim * mult)
         self.net = nn.Sequential(
-            # RMSNorm(dim),
+            RMSNorm(dim) if norm else nn.Identity(),
             # nn.Linear(dim_inner, dim_inner),
             Rearrange("b z c -> b c z"),
             nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
@@ -384,9 +385,10 @@ class Attend(nn.Module):
         # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
         # print(q.shape, k.shape, v.shape)
 
-        with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
-            # with torch.backends.cuda.sdp_kernel(**config._asdict()):
-            out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
+        # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
+        # with torch.backends.cuda.sdp_kernel(**config._asdict()):
+        # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
 
         return out
 
@@ -439,100 +441,100 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
-class DeepNormTransformerLayer(nn.Module):
-    """
-    ## Transformer Decoder Layer with DeepNorm
+# class DeepNormTransformerLayer(nn.Module):
+#     """
+#     ## Transformer Decoder Layer with DeepNorm
 
-    This implements a transformer decoder layer with DeepNorm.
-    Encoder layers will have a similar form.
-    """
+#     This implements a transformer decoder layer with DeepNorm.
+#     Encoder layers will have a similar form.
+#     """
 
-    def __init__(
-        self,
-        *,
-        d_model: int,
-        self_attn,
-        feed_forward,
-        deep_norm_alpha: float,
-        deep_norm_beta: float,
-    ):
-        """
-        :param d_model: is the token embedding size
-        :param self_attn: is the self attention module
-        :param feed_forward: is the feed forward module
-        :param deep_norm_alpha: is $\alpha$ coefficient in DeepNorm
-        :param deep_norm_beta: is $\beta$ constant for scaling weights initialization
-        """
-        super().__init__()
+#     def __init__(
+#         self,
+#         *,
+#         d_model: int,
+#         self_attn,
+#         feed_forward,
+#         deep_norm_alpha: float,
+#         deep_norm_beta: float,
+#     ):
+#         """
+#         :param d_model: is the token embedding size
+#         :param self_attn: is the self attention module
+#         :param feed_forward: is the feed forward module
+#         :param deep_norm_alpha: is $\alpha$ coefficient in DeepNorm
+#         :param deep_norm_beta: is $\beta$ constant for scaling weights initialization
+#         """
+#         super().__init__()
 
-        self.self_attn = self_attn
-        self.feed_forward = feed_forward
-        # DeepNorms after attention and feed forward network
-        self.self_attn_norm = DeepNorm(deep_norm_alpha, [d_model])
-        self.feed_forward_norm = DeepNorm(deep_norm_alpha, [d_model])
+#         self.self_attn = self_attn
+#         self.feed_forward = feed_forward
+#         # DeepNorms after attention and feed forward network
+#         self.self_attn_norm = DeepNorm(deep_norm_alpha, [d_model])
+#         self.feed_forward_norm = DeepNorm(deep_norm_alpha, [d_model])
 
-        # Scale weights after initialization
-        with torch.no_grad():
-            # Feed forward network linear transformations
-            for name, weight in feed_forward.named_parameters():
-                if "weight" in name:
-                    weight *= deep_norm_beta
+#         # Scale weights after initialization
+#         with torch.no_grad():
+#             # Feed forward network linear transformations
+#             for name, weight in feed_forward.named_parameters():
+#                 if "weight" in name:
+#                     weight *= deep_norm_beta
 
-            # Attention value projection
-            self_attn.to_gates.weight *= deep_norm_beta
-            # Attention output project
-            self_attn.to_out[0].weight *= deep_norm_beta
-            # self_attn.output.weight *= deep_norm_beta
+#             # Attention value projection
+#             self_attn.to_gates.weight *= deep_norm_beta
+#             # Attention output project
+#             self_attn.to_out[0].weight *= deep_norm_beta
+#             # self_attn.output.weight *= deep_norm_beta
 
-        # The mask will be initialized on the first call
-        self.mask = None
+#         # The mask will be initialized on the first call
+#         self.mask = None
 
-    def forward(self, x: torch.Tensor):
-        """
-        :param x: are the embeddings of shape `[seq_len, batch_size, d_model]`
-        """
+#     def forward(self, x: torch.Tensor):
+#         """
+#         :param x: are the embeddings of shape `[seq_len, batch_size, d_model]`
+#         """
 
-        # Run through self attention, i.e. keys and values are from self
-        x = self.self_attn_norm(x, self.self_attn(x))
-        # Pass through the feed-forward network
-        x = self.feed_forward_norm(x, self.feed_forward(x))
+#         # Run through self attention, i.e. keys and values are from self
+#         x = self.self_attn_norm(x, self.self_attn(x))
+#         # Pass through the feed-forward network
+#         x = self.feed_forward_norm(x, self.feed_forward(x))
 
-        return x
+#         return x
 
 
-class DeepNormTransformer(nn.Sequential):
-    def __init__(
-        self,
-        *,
-        dim,
-        depth,
-        alpha,
-        beta,
-        dim_head=64,
-        heads=8,
-        attn_dropout=0.0,
-        ff_mult=4,
-        rotary_embed=None,
-        flash_attn=True,
-    ):
-        layers = [
-            DeepNormTransformerLayer(
-                d_model=dim,
-                self_attn=Attention(
-                    dim,
-                    dim_head=dim_head,
-                    heads=heads,
-                    dropout=attn_dropout,
-                    rotary_embed=rotary_embed,
-                    flash=flash_attn,
-                ),
-                feed_forward=ConvFF(dim, mult=ff_mult),
-                deep_norm_alpha=alpha,
-                deep_norm_beta=beta,
-            )
-            for _ in range(depth)
-        ]
-        super().__init__(*layers)
+# class DeepNormTransformer(nn.Sequential):
+#     def __init__(
+#         self,
+#         *,
+#         dim,
+#         depth,
+#         alpha,
+#         beta,
+#         dim_head=64,
+#         heads=8,
+#         attn_dropout=0.0,
+#         ff_mult=4,
+#         rotary_embed=None,
+#         flash_attn=True,
+#     ):
+#         layers = [
+#             DeepNormTransformerLayer(
+#                 d_model=dim,
+#                 self_attn=Attention(
+#                     dim,
+#                     dim_head=dim_head,
+#                     heads=heads,
+#                     dropout=attn_dropout,
+#                     rotary_embed=rotary_embed,
+#                     flash=flash_attn,
+#                 ),
+#                 feed_forward=ConvFF(dim, mult=ff_mult),
+#                 deep_norm_alpha=alpha,
+#                 deep_norm_beta=beta,
+#             )
+#             for _ in range(depth)
+#         ]
+#         super().__init__(*layers)
 
 
 class Transformer(nn.Module):
@@ -565,8 +567,9 @@ class Transformer(nn.Module):
                             dropout=attn_dropout,
                             rotary_embed=rotary_embed,
                             flash=flash_attn,
+                            norm=True,
                         ),
-                        ConvFF(dim, mult=ff_mult),
+                        ConvFF(dim, mult=ff_mult, norm=True),
                         # FastKAN([dim, dim]) if use_khan else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
                     ]
                 )
@@ -802,28 +805,26 @@ class Net(nn.Module):
             # self.blocks = nn.Sequential(
             #     *[ConvNextTr(dim, dim, ks=5, rot_emb=self.rotary_embed, flash=True, dim_head=dim // heads) for _ in range(depth)]
             # )
-            self.blocks = nn.Sequential(
-                Rearrange("b c z -> b z c"),
-                DeepNormTransformer(
-                    dim=dim,
-                    depth=depth,
-                    alpha=deep_norm_alpha,
-                    beta=deep_norm_beta,
-                    dim_head=dim // heads,
-                    heads=heads,
-                    rotary_embed=self.rotary_embed,
-                    flash_attn=True,
-                ),
-                Rearrange("b z c -> b c z"),
-            )
-
             # self.blocks = nn.Sequential(
-            #     # UNetDepthOne(dim, num_out=dim),
-            #     # WaveLetBlock(dim),
             #     Rearrange("b c z -> b z c"),
-            #     Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+            #     DeepNormTransformer(
+            #         dim=dim,
+            #         depth=depth,
+            #         alpha=deep_norm_alpha,
+            #         beta=deep_norm_beta,
+            #         dim_head=dim // heads,
+            #         heads=heads,
+            #         rotary_embed=self.rotary_embed,
+            #         flash_attn=True,
+            #     ),
             #     Rearrange("b z c -> b c z"),
             # )
+
+            self.blocks = nn.Sequential(
+                Rearrange("b c z -> b z c"),
+                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                Rearrange("b z c -> b c z"),
+            )
         else:
             self.blocks = nn.Sequential(
                 # UNetDepthOne(dim, num_out=dim),

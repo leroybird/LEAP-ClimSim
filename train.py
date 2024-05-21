@@ -243,7 +243,7 @@ if __name__ == "__main__":
             ),
         ],
         enable_model_summary=True,
-        precision=16,
+        # precision=16,
         gradient_clip_val=1.0,
     )
     trainer.fit(lit_model)
