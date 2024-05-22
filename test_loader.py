@@ -17,6 +17,7 @@ grid_info_path = '/mnt/storage/kaggle/ClimSim_low-res_grid-info.nc'
 root_folder = Path('/mnt/storage/kaggle/train')
 weights = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
 weights = weights.iloc[0, 1:].values.astype(np.float32)
+
 #%%
 train_ds_sample = pl.read_parquet('/mnt/ssd/kaggle/train2.parquet', n_rows=100).to_pandas()
 train_ds_sample.shape

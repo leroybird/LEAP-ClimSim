@@ -1,3 +1,4 @@
+from ptwt._stationary_transform import _swt
 from collections import namedtuple
 from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
@@ -16,7 +17,15 @@ import torch
 from torch import Block, nn, Tensor
 from torch.nn import functional as F
 
-from mwt import MWT1d
+# from mwt import MWT1d
+# from fastkan import FastKAN
+from torch.nn.attention import SDPBackend
+
+# from labml_nn.normalization.deep_norm import DeepNorm
+
+# Enable TFfloat32
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -166,6 +175,18 @@ class GRN(nn.Module):
         return self.gamma * (x * Nx) + self.beta + x
 
 
+class GRN_CH_First(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.zeros(1, dim, 1))
+        self.beta = nn.Parameter(torch.zeros(1, dim, 1))
+
+    def forward(self, x):
+        Gx = torch.norm(x, p=2, dim=(-1,), keepdim=True)
+        Nx = Gx / (Gx.mean(dim=1, keepdim=True) + 1e-6)
+        return self.gamma * (x * Nx) + self.beta + x
+
+
 class DownSample(nn.Sequential):
     def __init__(self, in_ch, out_ch=None, ks=4):
         if out_ch is None:
@@ -308,6 +329,26 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+class ConvFF(nn.Module):
+    def __init__(self, dim, mult=4, norm=False):
+        super().__init__()
+        dim_inner = int(dim * mult)
+        self.net = nn.Sequential(
+            RMSNorm(dim) if norm else nn.Identity(),
+            # nn.Linear(dim_inner, dim_inner),
+            Rearrange("b z c -> b c z"),
+            nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
+            nn.GELU(),
+            # GRN_CH_First(dim_inner),
+            nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
+            Rearrange("b c z -> b z c"),
+            # nn.Linear(dim_inner, dim),
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+
 FlashAttentionConfig = namedtuple("FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"])
 
 
@@ -344,8 +385,10 @@ class Attend(nn.Module):
         # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
         # print(q.shape, k.shape, v.shape)
 
-        with torch.backends.cuda.sdp_kernel(**config._asdict()):
-            out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
+        # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
+        # with torch.backends.cuda.sdp_kernel(**config._asdict()):
+        # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
 
         return out
 
@@ -362,7 +405,7 @@ class Attend(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, rotary_embed=None, flash=True):
+    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, rotary_embed=None, flash=True, norm=False):
         super().__init__()
         self.heads = heads
         self.scale = dim_head**-0.5
@@ -372,7 +415,8 @@ class Attention(nn.Module):
 
         self.attend = Attend(flash=flash, dropout=dropout)
 
-        self.norm = RMSNorm(dim)
+        self.norm = RMSNorm(dim) if norm else nn.Identity()
+
         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
 
         self.to_gates = nn.Linear(dim, heads)
@@ -397,6 +441,102 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
+# class DeepNormTransformerLayer(nn.Module):
+#     """
+#     ## Transformer Decoder Layer with DeepNorm
+
+#     This implements a transformer decoder layer with DeepNorm.
+#     Encoder layers will have a similar form.
+#     """
+
+#     def __init__(
+#         self,
+#         *,
+#         d_model: int,
+#         self_attn,
+#         feed_forward,
+#         deep_norm_alpha: float,
+#         deep_norm_beta: float,
+#     ):
+#         """
+#         :param d_model: is the token embedding size
+#         :param self_attn: is the self attention module
+#         :param feed_forward: is the feed forward module
+#         :param deep_norm_alpha: is $\alpha$ coefficient in DeepNorm
+#         :param deep_norm_beta: is $\beta$ constant for scaling weights initialization
+#         """
+#         super().__init__()
+
+#         self.self_attn = self_attn
+#         self.feed_forward = feed_forward
+#         # DeepNorms after attention and feed forward network
+#         self.self_attn_norm = DeepNorm(deep_norm_alpha, [d_model])
+#         self.feed_forward_norm = DeepNorm(deep_norm_alpha, [d_model])
+
+#         # Scale weights after initialization
+#         with torch.no_grad():
+#             # Feed forward network linear transformations
+#             for name, weight in feed_forward.named_parameters():
+#                 if "weight" in name:
+#                     weight *= deep_norm_beta
+
+#             # Attention value projection
+#             self_attn.to_gates.weight *= deep_norm_beta
+#             # Attention output project
+#             self_attn.to_out[0].weight *= deep_norm_beta
+#             # self_attn.output.weight *= deep_norm_beta
+
+#         # The mask will be initialized on the first call
+#         self.mask = None
+
+#     def forward(self, x: torch.Tensor):
+#         """
+#         :param x: are the embeddings of shape `[seq_len, batch_size, d_model]`
+#         """
+
+#         # Run through self attention, i.e. keys and values are from self
+#         x = self.self_attn_norm(x, self.self_attn(x))
+#         # Pass through the feed-forward network
+#         x = self.feed_forward_norm(x, self.feed_forward(x))
+
+#         return x
+
+
+# class DeepNormTransformer(nn.Sequential):
+#     def __init__(
+#         self,
+#         *,
+#         dim,
+#         depth,
+#         alpha,
+#         beta,
+#         dim_head=64,
+#         heads=8,
+#         attn_dropout=0.0,
+#         ff_mult=4,
+#         rotary_embed=None,
+#         flash_attn=True,
+#     ):
+#         layers = [
+#             DeepNormTransformerLayer(
+#                 d_model=dim,
+#                 self_attn=Attention(
+#                     dim,
+#                     dim_head=dim_head,
+#                     heads=heads,
+#                     dropout=attn_dropout,
+#                     rotary_embed=rotary_embed,
+#                     flash=flash_attn,
+#                 ),
+#                 feed_forward=ConvFF(dim, mult=ff_mult),
+#                 deep_norm_alpha=alpha,
+#                 deep_norm_beta=beta,
+#             )
+#             for _ in range(depth)
+#         ]
+#         super().__init__(*layers)
+
+
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -410,7 +550,8 @@ class Transformer(nn.Module):
         ff_mult=4,
         norm_output=True,
         rotary_embed=None,
-        flash_attn=True
+        flash_attn=True,
+        use_khan=False,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -426,8 +567,10 @@ class Transformer(nn.Module):
                             dropout=attn_dropout,
                             rotary_embed=rotary_embed,
                             flash=flash_attn,
+                            norm=True,
                         ),
-                        FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
+                        ConvFF(dim, mult=ff_mult, norm=True),
+                        # FastKAN([dim, dim]) if use_khan else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
                     ]
                 )
             )
@@ -441,6 +584,47 @@ class Transformer(nn.Module):
             x = ff(x) + x
 
         return self.norm(x)
+
+
+class ConvNextTr(nn.Module):
+    """ConvNeXtV2 Block + Attention.
+
+    Args:
+        dim (int): Number of input channels.
+        drop_path (float): Stochastic depth rate. Default: 0.0
+    """
+
+    def __init__(self, dim_in, dim=None, mult=8, drop_path=0.0, ks=3, rot_emb=None, heads=8, dim_head=64, flash=True):
+        if dim is None:
+            dim = dim_in
+
+        super().__init__()
+        self.lin = nn.Conv1d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
+
+        self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash)
+        self.dwconv = nn.Conv1d(dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect")
+        self.norm = LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.act = nn.GELU()
+        self.grn = GRN(mult * dim)
+        self.pwconv2 = nn.Linear(mult * dim, dim)
+        self.identity = nn.Identity() if dim == dim_in else nn.Conv1d(dim_in, dim, 1)
+
+    def forward(self, x):
+        inp = x
+        x = self.lin(x)
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 1)
+        x = self.attend(x)
+
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.grn(x)
+        x = self.pwconv2(x)
+        x = x.permute(0, 2, 1)
+
+        return x + self.identity(inp)
 
 
 class UnetConvnext(nn.Module):
@@ -536,6 +720,24 @@ class UnetConvnext(nn.Module):
         return out
 
 
+def wavelet_transform(x, wavelet="db6", levels=3):
+    return torch.concatenate(_swt(x, wavelet, levels, axis=1) + [x], dim=-1)
+
+
+class WaveLetBlock(nn.Module):
+    def __init__(self, dim, wavelet="db6", levels=2):
+        super().__init__()
+        self.wavelet = wavelet
+        self.levels = levels
+        # fac = 4
+        # assert dim % fac == 0
+        # self.lin = nn.Conv1d(dim, dim // fac, 1)
+
+    def forward(self, x):
+        # x = self.lin(x)
+        return wavelet_transform(x, self.wavelet, self.levels)
+
+
 class Net(nn.Module):
     def __init__(
         self,
@@ -547,12 +749,13 @@ class Net(nn.Module):
         num_3d_start=6,
         num_vert=60,
         dim=512,
-        depth=8,
-        block=UNetDepthOne,
+        depth=6,
+        block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
         use_emb: bool = False,
         frac_idxs=None,
+        model_type="transformer",
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
@@ -587,6 +790,8 @@ class Net(nn.Module):
 
         heads = dim // 64
         self.rotary_embed = RotaryEmbedding(dim=dim // heads)
+        deep_norm_alpha = (2.0 * depth) ** (1.0 / 4.0)
+        deep_norm_beta = (8.0 * depth) ** -(1.0 / 4.0)
 
         # layers = []
         # for n in range(depth):
@@ -596,13 +801,37 @@ class Net(nn.Module):
         #                                         heads=heads, rotary_embed=self.rotary_embed),
         #                     Rearrange('b z c -> b c z')])
         # self.blocks = nn.Sequential(*layers)
+        if model_type == "transformer":
+            # self.blocks = nn.Sequential(
+            #     *[ConvNextTr(dim, dim, ks=5, rot_emb=self.rotary_embed, flash=True, dim_head=dim // heads) for _ in range(depth)]
+            # )
+            # self.blocks = nn.Sequential(
+            #     Rearrange("b c z -> b z c"),
+            #     DeepNormTransformer(
+            #         dim=dim,
+            #         depth=depth,
+            #         alpha=deep_norm_alpha,
+            #         beta=deep_norm_beta,
+            #         dim_head=dim // heads,
+            #         heads=heads,
+            #         rotary_embed=self.rotary_embed,
+            #         flash_attn=True,
+            #     ),
+            #     Rearrange("b z c -> b c z"),
+            # )
 
-        self.blocks = nn.Sequential(
-            UNetDepthOne(dim, num_out=dim),
-            Rearrange("b c z -> b z c"),
-            Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-            Rearrange("b z c -> b c z"),
-        )
+            self.blocks = nn.Sequential(
+                Rearrange("b c z -> b z c"),
+                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                Rearrange("b z c -> b c z"),
+            )
+        else:
+            self.blocks = nn.Sequential(
+                # UNetDepthOne(dim, num_out=dim),
+                Rearrange("b c z -> b z c"),
+                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                Rearrange("b z c -> b c z"),
+            )
         # self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
 
         # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
@@ -752,8 +981,8 @@ class NetTr(nn.Module):
         num_3d_out,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=4,
+        dim=1024,
+        depth=6,
         num_pos_emb=384,
         use_pos_emb: bool = False,
         frac_idxs=None,
