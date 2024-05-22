@@ -11,6 +11,15 @@ import polars as pl
 
 import norm
 
+def get_static(grid_info):
+    lat, lon = grid_info["lat"].values, grid_info["lon"].values
+    lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
+    lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
+    area_weight = grid_info["area"].values / grid_info["area"].values.mean()
+    area = 10 * (area_weight - 1.0)
+
+    static_data = np.stack([lon1, lon2, lat1, lat2, area], axis=1)
+    return static_data
 
 class LeapLoader:
     def __init__(
@@ -396,14 +405,9 @@ class LeapLoader:
             ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo").values
 
         if self.add_static:
-            lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
-            lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
-            lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
-            area = 10 * (self.grid_info["area_wgt"].values - 1.0)
-
-            static_data = np.stack([lon1, lon2, lat1, lat2, area], axis=1)
+            static_data = get_static(self.grid_info)
             ds_input = np.concatenate([ds_input, static_data], axis=1)
-
+            
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
         if self.y_transform and ds_target is not None:
@@ -415,7 +419,8 @@ class LeapLoader:
         if self.multi_step:
             x0, _ = self.get_data(idx, key="prev_path")
             x1, y = self.get_data(idx, key="path")
-            return np.concatenate([x0, x1], axis=1), y
+            x2, _ = self.get_data(idx, key="next_path")
+            return np.concatenate([x0, x1, x2], axis=1), y
         else:
             return self.get_data(idx)
 

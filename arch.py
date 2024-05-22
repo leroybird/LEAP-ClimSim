@@ -572,7 +572,7 @@ class Net(nn.Module):
         self.num_3d_start = num_3d_start
 
         self.layer_2d_3d = nn.Sequential(
-            nn.Conv2d(num_in_2d, num_in_2d * num_vert, kernel_size=(1, 2), groups=num_in_2d),
+            nn.Conv2d(num_in_2d, num_in_2d * num_vert, kernel_size=(1, 3), groups=num_in_2d),
             Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d, z=num_vert, x=1, k=1),
         )
 
@@ -581,7 +581,7 @@ class Net(nn.Module):
             nn.Conv2d(
                 num_3d_in,
                 dim - num_in_2d,
-                kernel_size=(1, 2),
+                kernel_size=(1, 3),
             ),
         )
 
@@ -660,7 +660,7 @@ class Net(nn.Module):
 
     def forward(self, x):
         # create a time dim
-        x = torch.stack(x.split(x.shape[1] // 2, dim=1), dim=-1)
+        x = torch.stack(x.split(x.shape[1] // 3, dim=1), dim=-1)
 
         split_idx = self.num_3d_start * self.num_vert
 

@@ -23,14 +23,15 @@ def r_squared(pred, tar, mask=None, s_total=0.886):
 
 # define the LightningModule
 class LitModel(L.LightningModule):
-    def __init__(self, model, cfg_data, cfg_loader):
+    def __init__(self, model, cfg_data, cfg_loader, setup_dataloader=True):
         super().__init__()
 
         self.model = torch.compile(model)
         self.cfg_data = cfg_data
         self.cfg_loader = cfg_loader
-
-        self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
+        
+        if setup_dataloader:
+            self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
 
         self.loss_func = nn.HuberLoss(delta=4.0)
         self.val_metrics = [fv.mae, fv.mse, r_squared]
@@ -131,7 +132,7 @@ def set_seed(seed=42):
     # torch.backends.cudnn.benchmark = False
 
 
-def get_model(cfg_data, cfg_loader, resume_path=None):
+def get_model(cfg_data, cfg_loader, resume_path=None, **kwargs):
 
     model = arch.Net(
         cfg_data.num_2d_feat,
@@ -141,9 +142,9 @@ def get_model(cfg_data, cfg_loader, resume_path=None):
     )
 
     if resume_path is not None:
-        lit_model = LitModel.load_from_checkpoint(resume_path, model=model, cfg_data=cfg_data, cfg_loader=cfg_loader)
+        lit_model = LitModel.load_from_checkpoint(resume_path, model=model, cfg_data=cfg_data, cfg_loader=cfg_loader, **kwargs)
     else:
-        lit_model = LitModel(model, cfg_data, cfg_loader)
+        lit_model = LitModel(model, cfg_data, cfg_loader, **kwargs)
 
     return lit_model
 

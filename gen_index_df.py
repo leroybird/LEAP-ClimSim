@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 #%%
 root_dir = Path('/mnt/storage/kaggle/train')
-output_path = Path('/mnt/ssd/kaggle/index.parquet')
+output_path = Path('/mnt/ssd/kaggle/index_fwd.parquet')
 
 #%%
 files = list(root_dir.rglob('*.mli.*.nc'))
@@ -31,8 +31,11 @@ output = defaultdict(list)
 time_offset = 3*10
 #%%
 for k, path in ens_year_map.items():
-    output['prev_path'].extend(path[0:-time_offset])
-    p_sub = path[time_offset:]
+    output['prev_path'].extend(path[0:-2*time_offset])
+    output['next_path'].extend(path[2*time_offset:])
+    
+    p_sub = path[time_offset:-time_offset]
+    
     output['path'].extend(p_sub)
     output['seconds'].extend([int(re.search(r'(\d{5}).nc', x).group(1)) for x in p_sub])
     output['day'].extend([int(re.search(r'-(\d{2})-(\d{5}).nc', x).group(1)) for x in p_sub])
@@ -41,7 +44,13 @@ for k, path in ens_year_map.items():
     output['month'].extend([int(month)]*len(p_sub))
     
 #%%
+
+
+{len(v) for v in output.values()}
+#%% 
 output = pd.DataFrame(output)
+#%%
+output
 #%%
 output['year'].value_counts()
 #%%

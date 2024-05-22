@@ -1,10 +1,12 @@
+wandb
+test_checkpoints/
+lightning_logs/ 
 plots
 models/
 *.pt
 *.json
 *.csv
 *.pth
-
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
