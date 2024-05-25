@@ -78,10 +78,11 @@ class EvalLoaderTime(Dataset):
         c_idx = l_idx + self.offset
         x0, _ = self.get_data(l_idx)
         x1, y = self.get_data(c_idx)
-        return np.concatenate([x0, x1], axis=0).astype(np.float32)
+        x2, _ = self.get_data(c_idx + self.num_grid_cells)
+        return np.concatenate([x0, x1, x2], axis=0).astype(np.float32)
 
     def __len__(self):
-        return self.data_dict["x"].shape[0] - self.offset
+        return self.data_dict["x"].shape[0] - self.offset * 2
 
 
 def get_predictions(model, test_loader):
