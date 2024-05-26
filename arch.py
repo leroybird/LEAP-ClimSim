@@ -817,6 +817,8 @@ class Net(nn.Module):
                     ff_swish=True,
                     ff_glu=True,
                     attn_talking_heads=True,
+                    attn_qk_norm = True,       # set to True
+                    attn_qk_norm_scale = 10,    # new scale on the similarity, with groups of 1
                     # gate_residual=True,
                     # ff_no_bias = True,
                     # attn_gate_values = True,
