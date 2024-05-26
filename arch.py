@@ -731,8 +731,8 @@ class Net(nn.Module):
         num_static=5,
         num_3d_start=6,
         num_vert=60,
-        dim=1024,
-        depth=16,
+        dim=512,
+        depth=20,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -817,12 +817,13 @@ class Net(nn.Module):
                     ff_swish=True,
                     ff_glu=True,
                     attn_talking_heads=True,
-                    attn_qk_norm = True,       # set to True
-                    attn_qk_norm_scale = 10,    # new scale on the similarity, with groups of 1
+                    attn_qk_norm=False,  # set to True
+                    #attn_qk_norm_groups=8,
+                    # attn_qk_norm_scale = 10,    # new scale on the similarity, with groups of 1
                     # gate_residual=True,
                     # ff_no_bias = True,
                     # attn_gate_values = True,
-                    pre_norm=False,  # in the paper, residual attention had best results with post-layernorm
+                    pre_norm=True,  # in the paper, residual attention had best results with post-layernorm
                     # residual_attn = True,    # add residual attention
                     # qk_norm_dim_scale=True,  # Cosine
                     # macaron = True # Two FFs
