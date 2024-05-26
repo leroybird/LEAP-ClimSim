@@ -17,6 +17,9 @@ import torch
 from torch import Block, nn, Tensor
 from torch.nn import functional as F
 
+from x_transformers.x_transformers import AttentionLayers
+import x_transformers
+
 # from mwt import MWT1d
 # from fastkan import FastKAN
 from torch.nn.attention import SDPBackend
@@ -329,20 +332,44 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 
+class ConvFFGated(nn.Module):
+    def __init__(self, dim, mult=4, norm=True, ks=3, **kwargs):
+        super().__init__()
+        dim_inner = int(dim * mult)
+        self.lin_in = nn.Sequential(
+            RMSNorm(dim) if norm else nn.Identity(),
+            Rearrange("b z c -> b c z"),
+            nn.Conv1d(dim, dim_inner, ks, padding=ks // 2, padding_mode="reflect"),
+            nn.SiLU(),
+        )
+        self.linear_v = nn.Sequential(nn.Linear(dim, dim_inner, bias=False), Rearrange("b z c -> b c z"))
+
+        self.lin_out = nn.Sequential(
+            Rearrange("b c z -> b z c"),
+            nn.Linear(dim_inner, dim, bias=False),
+            # nn.Conv1d(dim_inner, dim, ks, padding=ks // 2, padding_mode="reflect"),
+        )
+
+    def forward(self, x):
+        v = self.linear_v(x)
+        x = self.lin_in(x)
+        return self.lin_out(x * v)
+
+
+# x_transformers.FeedForward = ConvFFGated
+
+
 class ConvFF(nn.Module):
     def __init__(self, dim, mult=4, norm=False):
         super().__init__()
         dim_inner = int(dim * mult)
         self.net = nn.Sequential(
             RMSNorm(dim) if norm else nn.Identity(),
-            # nn.Linear(dim_inner, dim_inner),
             Rearrange("b z c -> b c z"),
             nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
             nn.GELU(),
-            # GRN_CH_First(dim_inner),
             nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
             Rearrange("b c z -> b z c"),
-            # nn.Linear(dim_inner, dim),
         )
 
     def forward(self, x):
@@ -441,102 +468,6 @@ class Attention(nn.Module):
         return self.to_out(out)
 
 
-# class DeepNormTransformerLayer(nn.Module):
-#     """
-#     ## Transformer Decoder Layer with DeepNorm
-
-#     This implements a transformer decoder layer with DeepNorm.
-#     Encoder layers will have a similar form.
-#     """
-
-#     def __init__(
-#         self,
-#         *,
-#         d_model: int,
-#         self_attn,
-#         feed_forward,
-#         deep_norm_alpha: float,
-#         deep_norm_beta: float,
-#     ):
-#         """
-#         :param d_model: is the token embedding size
-#         :param self_attn: is the self attention module
-#         :param feed_forward: is the feed forward module
-#         :param deep_norm_alpha: is $\alpha$ coefficient in DeepNorm
-#         :param deep_norm_beta: is $\beta$ constant for scaling weights initialization
-#         """
-#         super().__init__()
-
-#         self.self_attn = self_attn
-#         self.feed_forward = feed_forward
-#         # DeepNorms after attention and feed forward network
-#         self.self_attn_norm = DeepNorm(deep_norm_alpha, [d_model])
-#         self.feed_forward_norm = DeepNorm(deep_norm_alpha, [d_model])
-
-#         # Scale weights after initialization
-#         with torch.no_grad():
-#             # Feed forward network linear transformations
-#             for name, weight in feed_forward.named_parameters():
-#                 if "weight" in name:
-#                     weight *= deep_norm_beta
-
-#             # Attention value projection
-#             self_attn.to_gates.weight *= deep_norm_beta
-#             # Attention output project
-#             self_attn.to_out[0].weight *= deep_norm_beta
-#             # self_attn.output.weight *= deep_norm_beta
-
-#         # The mask will be initialized on the first call
-#         self.mask = None
-
-#     def forward(self, x: torch.Tensor):
-#         """
-#         :param x: are the embeddings of shape `[seq_len, batch_size, d_model]`
-#         """
-
-#         # Run through self attention, i.e. keys and values are from self
-#         x = self.self_attn_norm(x, self.self_attn(x))
-#         # Pass through the feed-forward network
-#         x = self.feed_forward_norm(x, self.feed_forward(x))
-
-#         return x
-
-
-# class DeepNormTransformer(nn.Sequential):
-#     def __init__(
-#         self,
-#         *,
-#         dim,
-#         depth,
-#         alpha,
-#         beta,
-#         dim_head=64,
-#         heads=8,
-#         attn_dropout=0.0,
-#         ff_mult=4,
-#         rotary_embed=None,
-#         flash_attn=True,
-#     ):
-#         layers = [
-#             DeepNormTransformerLayer(
-#                 d_model=dim,
-#                 self_attn=Attention(
-#                     dim,
-#                     dim_head=dim_head,
-#                     heads=heads,
-#                     dropout=attn_dropout,
-#                     rotary_embed=rotary_embed,
-#                     flash=flash_attn,
-#                 ),
-#                 feed_forward=ConvFF(dim, mult=ff_mult),
-#                 deep_norm_alpha=alpha,
-#                 deep_norm_beta=beta,
-#             )
-#             for _ in range(depth)
-#         ]
-#         super().__init__(*layers)
-
-
 class Transformer(nn.Module):
     def __init__(
         self,
@@ -552,24 +483,29 @@ class Transformer(nn.Module):
         rotary_embed=None,
         flash_attn=True,
         use_khan=False,
+        attend_start=4,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
 
-        for _ in range(depth):
+        for n in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        Attention(
-                            dim=dim,
-                            dim_head=dim_head,
-                            heads=heads,
-                            dropout=attn_dropout,
-                            rotary_embed=rotary_embed,
-                            flash=flash_attn,
-                            norm=True,
+                        (
+                            Attention(
+                                dim=dim,
+                                dim_head=dim_head,
+                                heads=heads,
+                                dropout=attn_dropout,
+                                rotary_embed=rotary_embed,
+                                flash=flash_attn,
+                                norm=True,
+                            )
+                            if n >= attend_start
+                            else ConvFFGated(dim, mult=ff_mult, norm=True, ks=5)
                         ),
-                        ConvFF(dim, mult=ff_mult, norm=True),
+                        ConvFFGated(dim, mult=ff_mult, norm=True),
                         # FastKAN([dim, dim]) if use_khan else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
                     ]
                 )
@@ -738,6 +674,53 @@ class WaveLetBlock(nn.Module):
         return wavelet_transform(x, self.wavelet, self.levels)
 
 
+# class FeedForward(Module):
+#     def __init__(
+#         self,
+#         dim,
+#         dim_out = None,
+#         mult = 4,
+#         glu = False,
+#         glu_mult_bias = False,
+#         swish = False,
+#         relu_squared = False,
+#         post_act_ln = False,
+#         dropout = 0.,
+#         no_bias = False,
+#         zero_init_output = False
+#     ):
+#         super().__init__()
+#         inner_dim = int(dim * mult)
+#         dim_out = default(dim_out, dim)
+
+#         if swish:
+#             activation = nn.SiLU()
+#         else:
+#             activation = nn.GELU()
+
+#         if glu:
+#             project_in = nn.GLU(dim, inner_dim, activation, mult_bias = glu_mult_bias)
+#         else:
+#             project_in = nn.Sequential(
+#                 nn.Linear(dim, inner_dim, bias = not no_bias),
+#                 activation
+#             )
+
+#         self.ff = Sequential(
+#             project_in,
+#             LayerNorm(inner_dim) if post_act_ln else None,
+#             nn.Dropout(dropout),
+#             nn.Linear(inner_dim, dim_out, bias = not no_bias)
+#         )
+
+#         # init last linear layer to 0
+#         if zero_init_output:
+#             init_zero_(self.ff[-1])
+
+#     def forward(self, x):
+#         return self.ff(x)
+
+
 class Net(nn.Module):
     def __init__(
         self,
@@ -748,8 +731,8 @@ class Net(nn.Module):
         num_static=5,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=6,
+        dim=1024,
+        depth=16,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -821,8 +804,28 @@ class Net(nn.Module):
             # )
 
             self.blocks = nn.Sequential(
+                # block(dim),
                 Rearrange("b c z -> b z c"),
-                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                # Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+                AttentionLayers(
+                    dim=dim,
+                    depth=depth,
+                    heads=dim // 64,
+                    use_simple_rmsnorm=True,
+                    rotary_pos_emb=True,
+                    attn_num_mem_kv=16,
+                    ff_swish=True,
+                    ff_glu=True,
+                    attn_talking_heads=True,
+                    # gate_residual=True,
+                    # ff_no_bias = True,
+                    # attn_gate_values = True,
+                    pre_norm=False,  # in the paper, residual attention had best results with post-layernorm
+                    # residual_attn = True,    # add residual attention
+                    # qk_norm_dim_scale=True,  # Cosine
+                    # macaron = True # Two FFs
+                    # sandwich_coef = 6  # interleave attention and feedforwards with sandwich coefficient of 6
+                ),
                 Rearrange("b z c -> b c z"),
             )
         else:
@@ -876,7 +879,7 @@ class Net(nn.Module):
         #                                 Rearrange('b c h -> b (c h)', h=1))
 
         self.out_3d = nn.Sequential(
-            block(dim),
+            # block(dim),
             nn.Conv1d(dim, num_3d_out, 1),
             Rearrange("b c z -> b (c z)"),
             nn.Linear(
@@ -885,7 +888,7 @@ class Net(nn.Module):
             ),
         )
 
-        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
+        self.out_2d = nn.Sequential(nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
 
     def forward(self, x):
         # create a time dim

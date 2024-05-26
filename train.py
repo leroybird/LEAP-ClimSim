@@ -1,6 +1,7 @@
 import argparse
+from matplotlib import pyplot as plt
 import torch
-import pytorch_lightning as L
+import lightning as L
 import wandb
 import fastai.vision.all as fv
 import torch.nn as nn
@@ -11,8 +12,9 @@ import dataloader
 import torch_optimizer as optim
 from scheduler import CyclicCosineDecayLR
 from schedulefree import AdamWScheduleFree
-from pytorch_lightning.callbacks import StochasticWeightAveraging
-from pytorch_lightning.callbacks import ModelSummary
+from lightning.pytorch.callbacks import StochasticWeightAveraging
+from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
+from lightning.pytorch.tuner import Tuner
 
 
 def r_squared(pred, tar, mask=None, s_total=0.886):
@@ -74,13 +76,16 @@ def mse_point(pred, tar):
 
 
 class LitModel(L.LightningModule):
-    def __init__(self, model, cfg_data, cfg_loader, setup_dataloader=True):
+    def __init__(self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=True):
         super().__init__()
 
-        self.model = torch.compile(model)
+        if pt_compile:
+            model = torch.compile(model)
+        self.model = model
+
         self.cfg_data = cfg_data
         self.cfg_loader = cfg_loader
-        
+
         if setup_dataloader:
             self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
 
@@ -88,7 +93,7 @@ class LitModel(L.LightningModule):
         self.val_metrics = [fv.mae, fv.mse, r_squared, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.train_metrics = [fv.mse, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.learning_rate = 1e-3
-        self.scheduler_steps = 1_000_000
+        self.scheduler_steps = 20_000_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
@@ -215,36 +220,47 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--lr_find", action="store_true")
+    parser.add_argument("--no_compile", action="store_true")
     args = parser.parse_args()
     lit_model = get_model(cfg_data, cfg_loader, args.resume)
 
-    # Add save model callback
-    checkpoint_callback = L.callbacks.ModelCheckpoint(
-        monitor="val_mse",
-        dirpath="models",
-        filename="model-{epoch:02d}-{val_mse:.2f}",
-        save_top_k=3,
-        mode="min",
-        save_weights_only=True,
-    )
+    callbacks = [
+        ModelSummary(max_depth=8),
+    ]
 
-    wandb.init(project="leap", config={**cfg_loader.model_dump(), **cfg_data.model_dump()})
-    wandb_logger = L.loggers.WandbLogger()
+    if not (args.debug or args.lr_find):
+        # Add save model callback
+        checkpoint_callback = ModelCheckpoint(
+            monitor="val_mse",
+            dirpath="models",
+            filename="model-{epoch:02d}-{val_mse:.2f}",
+            save_top_k=3,
+            mode="min",
+            save_weights_only=True,
+        )
+        callbacks.append(checkpoint_callback)
+
+        wandb.init(project="leap", config={**cfg_loader.model_dump(), **cfg_data.model_dump()})
+        logger = L.pytorch.loggers.WandbLogger()
+    else:
+        logger = None
 
     trainer = L.Trainer(
         max_epochs=1000,
-        logger=wandb_logger,
+        logger=logger,
         val_check_interval=20000,
-        callbacks=[
-            checkpoint_callback,
-            ModelSummary(max_depth=5),
-            StochasticWeightAveraging(
-                swa_lrs=1e-2,
-                annealing_epochs=2,
-            ),
-        ],
+        callbacks=callbacks,
         enable_model_summary=True,
         # precision=16,
         gradient_clip_val=1.0,
     )
-    trainer.fit(lit_model)
+
+    if args.lr_find:
+        lr_finder = Tuner(trainer).lr_find(lit_model, num_training=1000)
+        fig = lr_finder.plot(suggest=True)
+        plt.savefig("lr_find.png")
+        plt.close()
+    else:
+        trainer.fit(lit_model)
