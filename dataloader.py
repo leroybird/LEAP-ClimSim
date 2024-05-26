@@ -1,3 +1,4 @@
+from random import shuffle
 from re import I
 import torch
 from pathlib import Path
@@ -11,6 +12,7 @@ import polars as pl
 
 import norm
 
+
 def get_static(grid_info):
     lat, lon = grid_info["lat"].values, grid_info["lon"].values
     lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
@@ -20,6 +22,7 @@ def get_static(grid_info):
 
     static_data = np.stack([lon1, lon2, lat1, lat2, area], axis=1)
     return static_data
+
 
 class LeapLoader:
     def __init__(
@@ -407,7 +410,7 @@ class LeapLoader:
         if self.add_static:
             static_data = get_static(self.grid_info)
             ds_input = np.concatenate([ds_input, static_data], axis=1)
-            
+
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
         if self.y_transform and ds_target is not None:
@@ -501,15 +504,25 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
         y_transform=y_norm,
     )
 
-    train_ds = IterableDataset(inner_train_ds, num_workers=24)
-    train_dl = torch.utils.data.DataLoader(
-        train_ds,
-        num_workers=24,
-        batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
-        collate_fn=concat_collate,
-        pin_memory=True,
-    )
-
+    if loader_cfg.use_iterable_ds:
+        train_ds = IterableDataset(inner_train_ds, num_workers=24)
+        train_dl = torch.utils.data.DataLoader(
+            train_ds,
+            num_workers=24,
+            batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+            collate_fn=concat_collate,
+            pin_memory=True,
+            shuffle=loader_cfg.random_shuffle,
+        )
+    else:
+        train_ds = inner_train_ds
+        train_dl = torch.utils.data.DataLoader(
+            train_ds,
+            num_workers=loader_cfg.num_workers,
+            batch_size=loader_cfg.batch_size,
+            pin_memory=True,
+            shuffle=loader_cfg.random_shuffle,
+        )
     x, y = next(iter(train_dl))
     print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
 
@@ -522,12 +535,13 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
     )
 
     # effective batch size -> 384
-    valid_loader = torch.utils.data.DataLoader(
+    valid_dl = torch.utils.data.DataLoader(
         valid_ds,
         num_workers=12,
         batch_size=1,
         collate_fn=concat_collate,
         pin_memory=True,
+        shuffle=False,
     )
 
-    return train_dl, valid_loader
+    return train_ds, valid_ds, train_dl, valid_dl

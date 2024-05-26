@@ -84,11 +84,10 @@ class EvalLoaderTime(Dataset):
     def __len__(self):
         return self.data_dict["x"].shape[0] - self.offset * 2
 
+def get_preds_inputs(model, test_loader):
 
 def get_predictions(model, test_loader):
-    trainer = L.Trainer(
-        precision=16,
-    )
+    trainer = L.Trainer()
     preds = trainer.predict(
         model,
         test_loader,
@@ -96,6 +95,7 @@ def get_predictions(model, test_loader):
     preds = np.concatenate([p.numpy().astype(np.float32) for p in preds])
     print(preds.shape)
     return preds
+
 
 
 def save_predictions(preds, output_path, test_df, norm_y, y_names):
@@ -119,7 +119,10 @@ def save_predictions(preds, output_path, test_df, norm_y, y_names):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--test_df", type=str, required=True)
+    parser.add_argument("--ds_type", type=str, default="test", choices=["test", "train", "val"])
+    parser.add_argument("--max_samples", type=int, default=5000)
+
+    parser.add_argument("--test_df", type=str, default=None)
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--bs", type=int, default=128)
     parser.add_argument("--no_static", action="store_true")
@@ -131,22 +134,39 @@ if __name__ == "__main__":
     test_df = pl.read_parquet(args.test_df)
 
     cfg_loader = config.LoaderConfig()
+    if args.ds_type == "test":
+        assert args.test_df is not None
+    else:
+        cfg_loader.use_iterable_ds = False
+        cfg_loader.batch_size = 1
+        cfg_loader.random_shuffle = False
+        cfg_loader.num_workers = 4
+
     cfg_data = config.get_data_config(cfg_loader)
 
-    lit_model = train.get_model(cfg_data, cfg_loader, args.model, setup_dataloader=False)
+    lit_model = train.get_model(cfg_data, cfg_loader, args.model, setup_dataloader=args.dataset_type == "test")
 
     x_test = test_df.select(cfg_data.x_names).to_numpy()
     norm_x, norm_y = norm.get_stats(cfg_loader, cfg_data)
 
-    if args.no_time:
-        assert args.no_static
-        test_ds = EvalLoader({"x": x_test}, {"x": norm_x})
+    if args.dataset_type == "test":
+        if args.no_time:
+            assert args.no_static
+            test_ds = EvalLoader({"x": x_test}, {"x": norm_x})
+        else:
+            test_ds = EvalLoaderTime({"x": x_test}, {"x": norm_x})
+    elif args.dataset_type == "val":
+        test_ds = lit_model.valid_ds
     else:
-        test_ds = EvalLoaderTime({"x": x_test}, {"x": norm_x})
+        assert args.dataset_type == "train"
+        test_ds = lit_model.train_ds
 
     test_loader = DataLoader(test_ds, batch_size=args.bs, drop_last=False, shuffle=False, num_workers=0, pin_memory=True)
-
+    
+    
     preds = get_predictions(lit_model, test_loader)
+
+    
     for i, zeroed in enumerate(norm_y.zero_mask):
         if zeroed:
             print(f"Zeroing column {i}")

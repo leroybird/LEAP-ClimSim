@@ -12,6 +12,10 @@ class LoaderConfig(BaseModel):
 
     x_stats_path: str = "x_stats8.json"
 
+    # Train ds settings
+    use_iterable_ds: bool = True
+    random_shuffle: bool = True
+
     num_workers: int = 24
     seed: int = 42
     sample_size: int = 16

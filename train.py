@@ -82,12 +82,12 @@ class LitModel(L.LightningModule):
         self.cfg_loader = cfg_loader
         
         if setup_dataloader:
-            self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
+            self.train_ds, self.valid_ds, self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
 
         self.loss_func = nn.HuberLoss(delta=2.0)
         self.val_metrics = [fv.mae, fv.mse, r_squared, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.train_metrics = [fv.mse, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
-        self.learning_rate = 1e-3
+        self.learning_rate = 7e-4
         self.scheduler_steps = 1_000_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
@@ -193,7 +193,6 @@ def set_seed(seed=42):
 
 
 def get_model(cfg_data, cfg_loader, resume_path=None, **kwargs):
-
     model = arch.Net(
         cfg_data.num_2d_feat,
         cfg_data.num_vert_feat,
