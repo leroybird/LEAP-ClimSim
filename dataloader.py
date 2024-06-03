@@ -11,6 +11,7 @@ import polars as pl
 
 import norm
 
+
 def get_static(grid_info):
     lat, lon = grid_info["lat"].values, grid_info["lon"].values
     lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
@@ -20,6 +21,7 @@ def get_static(grid_info):
 
     static_data = np.stack([lon1, lon2, lat1, lat2, area], axis=1)
     return static_data
+
 
 class LeapLoader:
     def __init__(
@@ -407,7 +409,7 @@ class LeapLoader:
         if self.add_static:
             static_data = get_static(self.grid_info)
             ds_input = np.concatenate([ds_input, static_data], axis=1)
-            
+
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
         if self.y_transform and ds_target is not None:
@@ -420,7 +422,8 @@ class LeapLoader:
             x0, _ = self.get_data(idx, key="prev_path")
             x1, y = self.get_data(idx, key="path")
             x2, _ = self.get_data(idx, key="next_path")
-            return np.concatenate([x0, x1, x2], axis=1), y
+            # B ch T
+            return np.stack([x0, x1, x2], axis=-1), y
         else:
             return self.get_data(idx)
 

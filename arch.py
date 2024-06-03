@@ -744,11 +744,14 @@ class Net(nn.Module):
         self.num_2d_in = num_in_2d
         self.num_static = num_static
         num_in_2d = num_in_2d + num_static
+        
         if use_emb:
             self.embedding = nn.Embedding(num_emb, emb_ch)
             num_in_2d += emb_ch
         else:
             self.embedding = None
+
+        self.split_index = num_3d_start * num_vert
 
         self.num_3d_in = num_3d_in
         self.num_2d_out = num_2d_out
@@ -774,99 +777,36 @@ class Net(nn.Module):
 
         heads = dim // 64
         self.rotary_embed = RotaryEmbedding(dim=dim // heads)
-        deep_norm_alpha = (2.0 * depth) ** (1.0 / 4.0)
-        deep_norm_beta = (8.0 * depth) ** -(1.0 / 4.0)
 
-        # layers = []
-        # for n in range(depth):
-        #     layers.extend([Block(dim,),
-        #                     Rearrange('b c z -> b z c'),
-        #                    Transformer(dim=dim, depth=1, dim_head=dim//heads,
-        #                                         heads=heads, rotary_embed=self.rotary_embed),
-        #                     Rearrange('b z c -> b c z')])
-        # self.blocks = nn.Sequential(*layers)
-        if model_type == "transformer":
-            # self.blocks = nn.Sequential(
-            #     *[ConvNextTr(dim, dim, ks=5, rot_emb=self.rotary_embed, flash=True, dim_head=dim // heads) for _ in range(depth)]
-            # )
-            # self.blocks = nn.Sequential(
-            #     Rearrange("b c z -> b z c"),
-            #     DeepNormTransformer(
-            #         dim=dim,
-            #         depth=depth,
-            #         alpha=deep_norm_alpha,
-            #         beta=deep_norm_beta,
-            #         dim_head=dim // heads,
-            #         heads=heads,
-            #         rotary_embed=self.rotary_embed,
-            #         flash_attn=True,
-            #     ),
-            #     Rearrange("b z c -> b c z"),
-            # )
-
-            self.blocks = nn.Sequential(
-                # block(dim),
-                Rearrange("b c z -> b z c"),
-                # Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-                AttentionLayers(
-                    dim=dim,
-                    depth=depth,
-                    heads=dim // 64,
-                    use_simple_rmsnorm=True,
-                    rotary_pos_emb=True,
-                    attn_num_mem_kv=16,
-                    ff_swish=True,
-                    ff_glu=True,
-                    attn_talking_heads=False,
-                    attn_qk_norm=False,  # set to True
-                    # logit_softclamp_value=30,
-                    # attn_qk_norm_groups=8,
-                    # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
-                    # gate_residual=True,
-                    # ff_no_bias = True,
-                    # attn_gate_values = True,
-                    pre_norm=True,  # in the paper, residual attention had best results with post-layernorm
-                    # residual_attn = True,    # add residual attention
-                    # qk_norm_dim_scale=True,  # Cosine
-                    # macaron = True # Two FFs
-                    # sandwich_coef = 6  # interleave attention and feedforwards with sandwich coefficient of 6
-                ),
-                Rearrange("b z c -> b c z"),
-            )
-        else:
-            self.blocks = nn.Sequential(
-                # UNetDepthOne(dim, num_out=dim),
-                Rearrange("b c z -> b z c"),
-                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-                Rearrange("b z c -> b c z"),
-            )
-        # self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
-
-        # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
-        # layers = [conv_down(num_2d_3d + num_3d_in, mid_ch//2), nn.GELU(),
-        #           conv_down(mid_ch//2, mid_ch), nn.GELU(),
-        #           Rearrange('b c z y x -> b c (z y x)', y=1, x=1)]
-        # self.emb = Embedder(num_vert, 8)
-        # chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
-
-        # layers = [Permute([0, 2, 1])]
-        # for n in range(depth):
-        #     layers.append(PreNormResidual(dim, FeedForward(num_vert, 4, dense=chan_first)))
-        #     layers.append(PreNormResidual(dim, FeedForward(dim, 4, dense=chan_last)))
-        # layers.append(nn.LayerNorm(dim))
-        # layers.append(Permute([0, 2, 1]))
-
-        # layers = []
-        # for n in range(depth):
-        #     layers.append(block(dim))
-        # self.blocks = nn.Sequential(*layers)
-        # self.blocks = MWT1d(dim, depth=depth)
-        # for n in range(num_blocks):
-        #     layers.append(block(mid_ch))
-        #     # if include_atten:
-        #     #     atten = nn.Sequential(self.emb, LinearAttention(mid_ch+8, mid_ch))
-        #     #     layers.append(Residual(PreNorm(mid_ch, atten)))
-        #     layers.append(block(mid_ch))
+        self.blocks = nn.Sequential(
+            # block(dim),
+            Rearrange("b c z -> b z c"),
+            # Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+            AttentionLayers(
+                dim=dim,
+                depth=depth,
+                heads=dim // 64,
+                use_simple_rmsnorm=True,
+                rotary_pos_emb=True,
+                attn_num_mem_kv=16,
+                ff_swish=True,
+                ff_glu=True,
+                attn_talking_heads=False,
+                attn_qk_norm=False,  # set to True
+                # logit_softclamp_value=30,
+                # attn_qk_norm_groups=8,
+                # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
+                # gate_residual=True,
+                # ff_no_bias = True,
+                # attn_gate_values = True,
+                pre_norm=True,  # in the paper, residual attention had best results with post-layernorm
+                # residual_attn = True,    # add residual attention
+                # qk_norm_dim_scale=True,  # Cosine
+                # macaron = True # Two FFs
+                # sandwich_coef = 6  # interleave attention and feedforwards with sandwich coefficient of 6
+            ),
+            Rearrange("b z c -> b c z"),
+        )
 
         self.final_mult = 16
         out_3d = num_3d_out * self.final_mult * num_vert
@@ -896,25 +836,13 @@ class Net(nn.Module):
         self.out_2d = nn.Sequential(nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
 
     def forward(self, x):
-        # create a time dim
-        x = torch.stack(x.split(x.shape[1] // 3, dim=1), dim=-1)
-
-        split_idx = self.num_3d_start * self.num_vert
-
-        # Data contains 1d vars, point vars, then 1d, then static vars...
-        x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
-
-        x_1d_2, x_point = x_point[:, self.num_2d_in :], x_point[:, : self.num_2d_in]
-        x_1d_2, x_point_2 = x_1d_2[:, : -self.num_static], x_1d_2[:, -self.num_static :]
-
-        x_1d_2 = torch.cat([x_1d, x_1d_2], dim=1)
-        x_point = torch.cat([x_point, x_point_2], dim=1)[:, :, None, :]
-
         # if self.embedding is not None:
         #     x_emb = self.embedding(emb_idxs)
         #     x_2d = torch.cat([x_2d, x_emb], dim=1)
-
-        x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d_2).squeeze()], dim=1)
+        
+        x_point, x_1d = split_data(x, self.split_index, self.num_2d_in, self.num_static)
+        
+        x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d).squeeze()], dim=1)
 
         x_out = self.blocks(x_out)
 
@@ -934,136 +862,15 @@ class Net(nn.Module):
         return torch.cat([out_3d, out_2d], dim=1)
 
 
-class Transformer2(nn.Module):
-    def __init__(self, dim, depth, heads=8, dropout=0.0):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        PreNormResidual(dim, nn.MultiheadAttention(dim, heads, dropout=dropout)),
-                        PreNormResidual(
-                            dim,
-                            FeedForward(
-                                dim,
-                            ),
-                        ),
-                    ]
-                )
-            )
+def split_data(x, split_idx, num_2d_in, num_static):
+    # create a time dim
 
-    def forward(self, x):
-        for attn, ff in self.layers:
-            x = attn(x)
-            x = ff(x)
-        return x
+    # Data contains 1d vars, point vars, then 1d, then static vars...
+    x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
 
+    x_1d_2, x_point = x_point[:, num_2d_in :], x_point[:, : num_2d_in]
+    x_1d_2, x_point_2 = x_1d_2[:, : -num_static], x_1d_2[:, -num_static :]
 
-class NetMLP(nn.Module):
-    def __init__(self, num_in_2d, num_3d_in, num_2d_out, num_3d_out, num_3d_start=6, num_vert=60, depth=12, dim=512):
-        super().__init__()
-        self.num_2d_in = num_in_2d
-        self.num_3d_in = num_3d_in
-        self.num_2d_out = num_2d_out
-        self.num_3d_out = num_3d_out
-        self.num_vert = num_vert
-        self.num_3d_start = num_3d_start
-
-        layers = [nn.Linear(num_in_2d + num_vert * num_3d_in, dim)]
-        layers += [PreNormResidual(dim, FeedForward(dim)) for _ in range(depth)]
-        layers += [nn.Linear(dim, num_2d_out + num_3d_out * num_vert)]
-
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        x, emb_idxs = x
-        return self.layers(x)
-
-
-class NetTr(nn.Module):
-    def __init__(
-        self,
-        num_in_2d,
-        num_3d_in,
-        num_2d_out,
-        num_3d_out,
-        num_3d_start=6,
-        num_vert=60,
-        dim=1024,
-        depth=6,
-        num_pos_emb=384,
-        use_pos_emb: bool = False,
-        frac_idxs=None,
-    ):
-        super().__init__()
-        # self.num_2d_in = num_in_2d
-
-        self.total_in = num_in_2d + num_3d_in * num_vert
-        self.total_out = num_2d_out + num_3d_out * num_vert
-
-        self.emb_in = nn.Linear(1, dim)
-
-        self.emb_out = nn.Parameter(torch.randn(self.total_out, dim))
-        self.vert_emb = nn.Embedding(num_vert + 1, dim)
-        self.var_emb = nn.Embedding(num_3d_in + num_in_2d + num_2d_out + num_3d_out, dim)
-
-        # Input idxs, 3d, 2d, 3d
-        vert_indxs = torch.arange(0, num_vert, dtype=torch.long).repeat(num_3d_in)
-        vert_indxs_2d = torch.Tensor([num_vert] * num_in_2d).long()
-        vert_indxs = torch.cat([vert_indxs[0 : num_3d_start * num_vert], vert_indxs_2d, vert_indxs[num_3d_start * num_vert :]])
-
-        # output idxs, 3d, 2d
-        vert_indxs = torch.cat([vert_indxs, torch.arange(num_vert, dtype=torch.long).repeat(num_3d_out)])
-        self.vert_indxs = torch.cat([vert_indxs, num_vert * torch.ones(num_2d_out, dtype=torch.long)])
-
-        total_3d = num_3d_in + num_3d_out
-        var_idxs = torch.Tensor([[n] * num_vert for n in range(total_3d)]).flatten().long()
-        var_idxs_2d = torch.arange(total_3d, total_3d + num_in_2d + num_2d_out, step=1, dtype=torch.long)
-
-        # 3d_in, 2d_in, 3d_in_2, 2d_out, 3d_out
-        self.var_idxs = torch.cat(
-            [
-                var_idxs[0 : num_3d_start * num_vert],
-                var_idxs_2d[:num_in_2d],
-                var_idxs[num_3d_start * num_vert :],
-                var_idxs_2d[num_in_2d:],
-            ]
-        )
-
-        self.rotary_embed = RotaryEmbedding(dim=64)
-        # Transformer
-        self.transformer = Transformer(dim=dim, depth=depth, dim_head=64, heads=dim // 64, rotary_embed=self.rotary_embed)
-
-        if use_pos_emb:
-            self.pos_emb = nn.Embedding(num_pos_emb, dim)
-        else:
-            self.pos_emb = None
-
-        self.out = nn.Linear(dim, 1)
-
-    def check_emb_idxs(self, input_names, output_names):
-        return pd.DataFrame(
-            {
-                "names": input_names + output_names,
-                "var_idxs": self.var_idxs.cpu().numpy(),
-                "vert_idxs": self.vert_indxs.cpu().numpy(),
-            }
-        )
-
-    def forward(self, x):
-        x, emb_idxs = x
-        bs, num_in = x.shape
-        # Treat x like a sequence of single channels values
-        x_in = self.emb_in(x[:, :, None])
-        x_out = self.emb_out[None, :, :].repeat(bs, 1, 1)
-        x = torch.cat([x_in, x_out], dim=1)
-
-        x = x + self.vert_emb(self.vert_indxs.to(x.device))[None, :, :]
-        x = x + self.var_emb(self.var_idxs.to(x.device))[None, :, :]
-        if self.pos_emb is not None:
-            x = x + self.pos_emb(emb_idxs)
-
-        x = self.transformer(x)
-        x = x[:, num_in:, :]
-        return self.out(x)[:, :, 0]
+    x_1d = torch.cat([x_1d, x_1d_2], dim=1)
+    x_point = torch.cat([x_point, x_point_2], dim=1)[:, :, None, :]
+    return x_point, x_1d
