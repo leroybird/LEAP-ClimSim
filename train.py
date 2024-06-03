@@ -93,7 +93,7 @@ class LitModel(L.LightningModule):
         self.val_metrics = [fv.mae, fv.mse, r_squared, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.train_metrics = [fv.mse, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
         self.learning_rate = 1e-3
-        self.scheduler_steps = 20_000_000
+        self.scheduler_steps = 600_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
@@ -157,22 +157,31 @@ class LitModel(L.LightningModule):
             opt = AdamWScheduleFree(
                 self.model.parameters(),
                 lr=self.learning_rate,
-                weight_decay=0.01,
+                weight_decay=1e-5,
                 warmup_steps=1000,
                 betas=(0.95, 0.999),
             )
             self.opt = opt
             return opt
         else:
-            opt = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=0.001)
+            opt = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001)
             opt = optim.Lookahead(opt, k=5, alpha=0.5)
-
+            # opt = Ranger21(
+            #     self.model.parameters(),
+            #     num_epochs=100_000_000,
+            #     num_batches_per_epoch=100000,
+            #     lr=self.learning_rate,
+            #     weight_decay=0.001,
+            #     warmdown_active=False,
+            #     use_warmup=False,
+            #     using_gc=False,
+            # )
             scheduler = CyclicCosineDecayLR(
                 opt,
                 init_decay_epochs=self.scheduler_steps,
-                min_decay_lr=1e-7,
+                min_decay_lr=1e-8,
                 restart_interval=5000,
-                restart_lr=2e-7,
+                restart_lr=2e-8,
                 warmup_epochs=1000,
                 warmup_start_lr=self.learning_rate / 100,
                 restart_interval_multiplier=1.4,

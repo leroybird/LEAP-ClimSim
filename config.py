@@ -16,7 +16,7 @@ class LoaderConfig(BaseModel):
     seed: int = 42
     sample_size: int = 16
 
-    batch_size: int = 64
+    batch_size: int = 128
 
 
 class DataConfig(BaseModel):

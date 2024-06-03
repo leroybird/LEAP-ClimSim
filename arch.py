@@ -731,8 +731,8 @@ class Net(nn.Module):
         num_static=5,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=20,
+        dim=256,
+        depth=10,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -757,16 +757,17 @@ class Net(nn.Module):
         self.frac_idxs = frac_idxs
         self.num_3d_start = num_3d_start
 
+        mult_fac_2d = 1
         self.layer_2d_3d = nn.Sequential(
-            nn.Conv2d(num_in_2d, num_in_2d * num_vert, kernel_size=(1, 3), groups=num_in_2d),
-            Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d, z=num_vert, x=1, k=1),
+            nn.Conv2d(num_in_2d, num_in_2d * num_vert * mult_fac_2d, kernel_size=(1, 3), groups=num_in_2d),
+            Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d * mult_fac_2d, z=num_vert, x=1, k=1),
         )
 
         self.layer_3d = nn.Sequential(
             Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
             nn.Conv2d(
                 num_3d_in,
-                dim - num_in_2d,
+                dim - num_in_2d * mult_fac_2d,
                 kernel_size=(1, 3),
             ),
         )
@@ -816,10 +817,11 @@ class Net(nn.Module):
                     attn_num_mem_kv=16,
                     ff_swish=True,
                     ff_glu=True,
-                    attn_talking_heads=True,
+                    attn_talking_heads=False,
                     attn_qk_norm=False,  # set to True
-                    #attn_qk_norm_groups=8,
-                    # attn_qk_norm_scale = 10,    # new scale on the similarity, with groups of 1
+                    # logit_softclamp_value=30,
+                    # attn_qk_norm_groups=8,
+                    # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
                     # gate_residual=True,
                     # ff_no_bias = True,
                     # attn_gate_values = True,
@@ -913,6 +915,7 @@ class Net(nn.Module):
         #     x_2d = torch.cat([x_2d, x_emb], dim=1)
 
         x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d_2).squeeze()], dim=1)
+
         x_out = self.blocks(x_out)
 
         out_3d = self.out_3d(x_out)
