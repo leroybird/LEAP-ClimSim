@@ -674,51 +674,96 @@ class WaveLetBlock(nn.Module):
         return wavelet_transform(x, self.wavelet, self.levels)
 
 
-# class FeedForward(Module):
-#     def __init__(
-#         self,
-#         dim,
-#         dim_out = None,
-#         mult = 4,
-#         glu = False,
-#         glu_mult_bias = False,
-#         swish = False,
-#         relu_squared = False,
-#         post_act_ln = False,
-#         dropout = 0.,
-#         no_bias = False,
-#         zero_init_output = False
-#     ):
-#         super().__init__()
-#         inner_dim = int(dim * mult)
-#         dim_out = default(dim_out, dim)
+class ConvNextEnc(nn.Module):
+    """ConvNeXtV2 Block + Attention.
 
-#         if swish:
-#             activation = nn.SiLU()
-#         else:
-#             activation = nn.GELU()
+    Args:
+        dim (int): Number of input channels.
+        drop_path (float): Stochastic depth rate. Default: 0.0
+    """
 
-#         if glu:
-#             project_in = nn.GLU(dim, inner_dim, activation, mult_bias = glu_mult_bias)
-#         else:
-#             project_in = nn.Sequential(
-#                 nn.Linear(dim, inner_dim, bias = not no_bias),
-#                 activation
-#             )
+    def __init__(self, dim_in, dim=None, mult=4, ks=3, rot_emb=None, heads=8, dim_head=64, flash=True):
+        if dim is None:
+            dim = dim_in
 
-#         self.ff = Sequential(
-#             project_in,
-#             LayerNorm(inner_dim) if post_act_ln else None,
-#             nn.Dropout(dropout),
-#             nn.Linear(inner_dim, dim_out, bias = not no_bias)
-#         )
+        super().__init__()
+        self.lin = nn.Conv2d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
 
-#         # init last linear layer to 0
-#         if zero_init_output:
-#             init_zero_(self.ff[-1])
+        # self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash)
+        self.dwconv = nn.Conv2d(dim, dim, kernel_size=(ks, 3), padding=(ks // 2, 1), groups=dim, padding_mode="reflect")
+        self.norm = LayerNorm(dim, eps=1e-6)
+        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.act = nn.GELU()
+        self.grn = GRN(mult * dim)
+        self.pwconv2 = nn.Linear(mult * dim, dim)
+        self.identity = nn.Identity() if dim == dim_in else nn.Conv2d(dim_in, dim, 1)
 
-#     def forward(self, x):
-#         return self.ff(x)
+    def forward(self, x):
+        inp = x
+        x = self.lin(x)
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1)
+        # x = self.attend(x)
+
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.grn(x)
+        x = self.pwconv2(x)
+        x = x.permute(0, 3, 1, 2)
+
+        return x + self.identity(inp)
+
+
+class XEncoder(nn.Module):
+
+    def __init__(
+        self,
+        dim: int,
+        depth: int,
+        rot_emb,
+        num_in_2d,
+        num_3d_in,
+        num_vert=60,
+    ):
+        super().__init__()
+        mult_fac_2d = 1
+        dim_in = dim // 2
+        self.rot_emb = rot_emb
+
+        self.layer_2d_3d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange("b (c z) t -> b c z t", c=num_in_2d * mult_fac_2d, z=num_vert),
+        )
+
+        self.layer_3d = nn.Sequential(
+            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+            nn.Conv2d(
+                num_3d_in,
+                dim_in - num_in_2d * mult_fac_2d,
+                kernel_size=1,
+            ),
+        )
+
+        self.blocks = nn.Sequential(
+            *[ConvNextEnc(dim_in if n == 0 else dim, dim, rot_emb=rot_emb) for n in range(depth)] + [nn.Conv2d(dim, dim_in, 1)]
+        )
+
+    def forward(self, xp, x1d):
+        xp = self.layer_2d_3d(xp)
+        x1d = self.layer_3d(x1d)
+
+        x_enc = torch.cat((xp, x1d), dim=1)
+        x_m = x_enc[..., 1]
+
+        x = self.blocks(x_enc)[..., 1]
+
+        return torch.cat((x, x_m), dim=1)
 
 
 class Net(nn.Module):
@@ -744,7 +789,7 @@ class Net(nn.Module):
         self.num_2d_in = num_in_2d
         self.num_static = num_static
         num_in_2d = num_in_2d + num_static
-        
+
         if use_emb:
             self.embedding = nn.Embedding(num_emb, emb_ch)
             num_in_2d += emb_ch
@@ -760,23 +805,23 @@ class Net(nn.Module):
         self.frac_idxs = frac_idxs
         self.num_3d_start = num_3d_start
 
-        mult_fac_2d = 1
-        self.layer_2d_3d = nn.Sequential(
-            nn.Conv2d(num_in_2d, num_in_2d * num_vert * mult_fac_2d, kernel_size=(1, 3), groups=num_in_2d),
-            Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d * mult_fac_2d, z=num_vert, x=1, k=1),
-        )
+        # self.layer_2d_3d = nn.Sequential(
+        #     nn.Conv2d(num_in_2d, num_in_2d * num_vert * mult_fac_2d, kernel_size=(1, 3), groups=num_in_2d),
+        #     Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d * mult_fac_2d, z=num_vert, x=1, k=1),
+        # )
 
-        self.layer_3d = nn.Sequential(
-            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
-            nn.Conv2d(
-                num_3d_in,
-                dim - num_in_2d * mult_fac_2d,
-                kernel_size=(1, 3),
-            ),
-        )
+        # self.layer_3d = nn.Sequential(
+        #     Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+        #     nn.Conv2d(
+        #         num_3d_in,
+        #         dim - num_in_2d * mult_fac_2d,
+        #         kernel_size=(1, 3),
+        #     ),
+        # )
 
         heads = dim // 64
         self.rotary_embed = RotaryEmbedding(dim=dim // heads)
+        self.enc = XEncoder(4, depth, self.rotary_embed, num_in_2d, num_3d_in, num_vert)
 
         self.blocks = nn.Sequential(
             # block(dim),
@@ -839,10 +884,10 @@ class Net(nn.Module):
         # if self.embedding is not None:
         #     x_emb = self.embedding(emb_idxs)
         #     x_2d = torch.cat([x_2d, x_emb], dim=1)
-        
+
         x_point, x_1d = split_data(x, self.split_index, self.num_2d_in, self.num_static)
-        
-        x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d).squeeze()], dim=1)
+
+        x_out = self.enc(x_point, x_1d)
 
         x_out = self.blocks(x_out)
 
@@ -868,9 +913,9 @@ def split_data(x, split_idx, num_2d_in, num_static):
     # Data contains 1d vars, point vars, then 1d, then static vars...
     x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
 
-    x_1d_2, x_point = x_point[:, num_2d_in :], x_point[:, : num_2d_in]
-    x_1d_2, x_point_2 = x_1d_2[:, : -num_static], x_1d_2[:, -num_static :]
+    x_1d_2, x_point = x_point[:, num_2d_in:], x_point[:, :num_2d_in]
+    x_1d_2, x_point_2 = x_1d_2[:, :-num_static], x_1d_2[:, -num_static:]
 
     x_1d = torch.cat([x_1d, x_1d_2], dim=1)
-    x_point = torch.cat([x_point, x_point_2], dim=1)[:, :, None, :]
+    x_point = torch.cat([x_point, x_point_2], dim=1)
     return x_point, x_1d
