@@ -76,7 +76,9 @@ def mse_point(pred, tar):
 
 
 class LitModel(L.LightningModule):
-    def __init__(self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=True):
+    def __init__(
+        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=True
+    ):
         super().__init__()
 
         if pt_compile:
@@ -87,16 +89,39 @@ class LitModel(L.LightningModule):
         self.cfg_loader = cfg_loader
 
         if setup_dataloader:
-            self.train_loader, self.valid_loader = dataloader.setup_dataloaders(cfg_loader, cfg_data)
+            self.train_loader, self.valid_loader = dataloader.setup_dataloaders(
+                cfg_loader, cfg_data
+            )
 
         self.loss_func = nn.HuberLoss(delta=2.0)
-        self.val_metrics = [fv.mae, fv.mse, r_squared, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
-        self.train_metrics = [fv.mse, mse_t, mse_q1, mse_q2, mse_q3, mse_u, mse_v, mse_point]
+        self.val_metrics = [
+            fv.mae,
+            fv.mse,
+            r_squared,
+            mse_t,
+            mse_q1,
+            mse_q2,
+            mse_q3,
+            mse_u,
+            mse_v,
+            mse_point,
+        ]
+        self.train_metrics = [
+            fv.mse,
+            mse_t,
+            mse_q1,
+            mse_q2,
+            mse_q3,
+            mse_u,
+            mse_v,
+            mse_point,
+        ]
         self.learning_rate = 1e-3
         self.scheduler_steps = 600_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
+
         # self.mask[0:60] = True
         # self.mask[240:] = True
 
@@ -110,10 +135,20 @@ class LitModel(L.LightningModule):
         loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
         if step_name != "train" or batch_idx % 20 == 0:
-            self.log(f"{step_name}_loss", loss.item(), prog_bar=True, on_step=step_name == "train", on_epoch=step_name == "val")
+            self.log(
+                f"{step_name}_loss",
+                loss.item(),
+                prog_bar=True,
+                on_step=step_name == "train",
+                on_epoch=step_name == "val",
+            )
 
             for metric in metrics:
-                self.log(f"{step_name}_{metric.__name__}", metric(pred, y).item(), prog_bar=True)
+                self.log(
+                    f"{step_name}_{metric.__name__}",
+                    metric(pred, y).item(),
+                    prog_bar=True,
+                )
 
         return loss
 
@@ -164,18 +199,12 @@ class LitModel(L.LightningModule):
             self.opt = opt
             return opt
         else:
-            opt = torch.optim.AdamW(self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001)
-            opt = optim.Lookahead(opt, k=5, alpha=0.5)
-            # opt = Ranger21(
-            #     self.model.parameters(),
-            #     num_epochs=100_000_000,
-            #     num_batches_per_epoch=100000,
-            #     lr=self.learning_rate,
-            #     weight_decay=0.001,
-            #     warmdown_active=False,
-            #     use_warmup=False,
-            #     using_gc=False,
+            opt = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
+
+            # opt = torch.optim.AdamW(
+            #     self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001
             # )
+            # opt = optim.Lookahead(opt, k=5, alpha=0.5)
             scheduler = CyclicCosineDecayLR(
                 opt,
                 init_decay_epochs=self.scheduler_steps,
@@ -216,7 +245,9 @@ def get_model(cfg_data, cfg_loader, resume_path=None, **kwargs):
     )
 
     if resume_path is not None:
-        lit_model = LitModel.load_from_checkpoint(resume_path, model=model, cfg_data=cfg_data, cfg_loader=cfg_loader, **kwargs)
+        lit_model = LitModel.load_from_checkpoint(
+            resume_path, model=model, cfg_data=cfg_data, cfg_loader=cfg_loader, **kwargs
+        )
     else:
         lit_model = LitModel(model, cfg_data, cfg_loader, **kwargs)
 
@@ -243,15 +274,17 @@ if __name__ == "__main__":
         # Add save model callback
         checkpoint_callback = ModelCheckpoint(
             monitor="val_mse",
-            dirpath="models",
-            filename="model-{epoch:02d}-{val_mse:.2f}",
+            dirpath="checkpoints/",
+            filename="model-{step:06d}-{val_mse:.3f}",
             save_top_k=3,
             mode="min",
             save_weights_only=True,
         )
         callbacks.append(checkpoint_callback)
 
-        wandb.init(project="leap", config={**cfg_loader.model_dump(), **cfg_data.model_dump()})
+        wandb.init(
+            project="leap", config={**cfg_loader.model_dump(), **cfg_data.model_dump()}
+        )
         logger = L.pytorch.loggers.WandbLogger()
     else:
         logger = None
@@ -262,7 +295,7 @@ if __name__ == "__main__":
         val_check_interval=20000,
         callbacks=callbacks,
         enable_model_summary=True,
-        # precision=16,
+        #precision="bf16-mixed",
         gradient_clip_val=1.0,
     )
 

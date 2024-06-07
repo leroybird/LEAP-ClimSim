@@ -11,6 +11,7 @@ from arch import NetTr
 import torch
 #%%
 weightings = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
+weighting = weightings.iloc[0, 1:].values.astype(np.float32)
 #%%
 weightings
 #%%
@@ -19,7 +20,6 @@ train_df = pl.read_parquet('/mnt/ssd/kaggle/train2.parquet', n_rows=10_000)
 test_df = pl.read_parquet('/mnt/ssd/kaggle/test.parquet', columns=['sample_id', 'pbuf_SOLIN', "pbuf_COSZRS", 'cam_in_LANDFRAC', 'state_t_40', 'state_t_55', 'state_t_59'])
 
 #%%
-weighting = weightings.iloc[0, 1:].values.astype(np.float32)
 weighting
 #%%
 pl.Config(tbl_cols=-1, tbl_rows=20)

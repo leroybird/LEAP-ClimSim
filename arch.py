@@ -3,13 +3,11 @@ from collections import namedtuple
 from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
 import math
-import re
 import numpy as np
 
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange
 import pandas as pd
-from regex import R
 from torchvision.ops import Permute
 import torch.nn.functional as F
 from typing import Callable, Optional, List, final
@@ -112,7 +110,11 @@ class PreNorm(nn.Module):
 
 class CNBlock1d(nn.Module):
     def __init__(
-        self, dim, layer_scale: float = 1e-4, norm_layer: Optional[Callable[..., nn.Module]] = None, kernel_size=9
+        self,
+        dim,
+        layer_scale: float = 1e-4,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        kernel_size=9,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -120,7 +122,13 @@ class CNBlock1d(nn.Module):
 
         self.block = nn.Sequential(
             nn.Conv1d(
-                dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim, bias=True, padding_mode="replicate"
+                dim,
+                dim,
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                groups=dim,
+                bias=True,
+                padding_mode="replicate",
             ),
             Permute([0, 2, 1]),
             norm_layer(dim),
@@ -155,7 +163,9 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+            return F.layer_norm(
+                x, self.normalized_shape, self.weight, self.bias, self.eps
+            )
         elif self.data_format == "channels_first":
             u = x.mean(1, keepdim=True)
             s = (x - u).pow(2).mean(1, keepdim=True)
@@ -194,7 +204,10 @@ class DownSample(nn.Sequential):
     def __init__(self, in_ch, out_ch=None, ks=4):
         if out_ch is None:
             out_ch = in_ch
-        super().__init__(LayerNorm(in_ch, data_format="channels_first"), nn.Conv1d(in_ch, out_ch, kernel_size=ks, stride=ks))
+        super().__init__(
+            LayerNorm(in_ch, data_format="channels_first"),
+            nn.Conv1d(in_ch, out_ch, kernel_size=ks, stride=ks),
+        )
 
 
 class ConvNextBlock2(nn.Module):
@@ -211,9 +224,13 @@ class ConvNextBlock2(nn.Module):
 
         super().__init__()
         self.lin = nn.Conv1d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect")
+        self.dwconv = nn.Conv1d(
+            dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect"
+        )
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(
+            dim, mult * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
@@ -245,7 +262,13 @@ class PreNormResidual(nn.Module):
 
 def FeedForwardFlip(dim, expansion_factor=4, dropout=0.0, dense=nn.Linear):
     inner_dim = int(dim * expansion_factor)
-    return nn.Sequential(dense(dim, inner_dim), nn.GELU(), nn.Dropout(dropout), dense(inner_dim, dim), nn.Dropout(dropout))
+    return nn.Sequential(
+        dense(dim, inner_dim),
+        nn.GELU(),
+        nn.Dropout(dropout),
+        dense(inner_dim, dim),
+        nn.Dropout(dropout),
+    )
 
 
 class PixelShuffle1D(nn.Module):
@@ -267,7 +290,9 @@ class PixelShuffle1D(nn.Module):
         long_channel_len = short_channel_len // self.upscale_factor
         long_width = self.upscale_factor * short_width
 
-        x = x.contiguous().view([batch_size, self.upscale_factor, long_channel_len, short_width])
+        x = x.contiguous().view(
+            [batch_size, self.upscale_factor, long_channel_len, short_width]
+        )
         x = x.permute(0, 2, 3, 1).contiguous()
         x = x.view(batch_size, long_channel_len, long_width)
 
@@ -287,7 +312,10 @@ class UNetDepthOne(nn.Module):
 
         self.down = DownSample(dim, dim * mult, ks=scale_factor)
         self.middle = ConvNextBlock2(dim * mult)
-        self.up = nn.Sequential(nn.Conv1d(dim * mult, dim * scale_factor, 1, groups=dim), PixelShuffle1D(scale_factor))
+        self.up = nn.Sequential(
+            nn.Conv1d(dim * mult, dim * scale_factor, 1, groups=dim),
+            PixelShuffle1D(scale_factor),
+        )
 
         self.final = nn.Sequential(
             ConvNextBlock2(dim * 2, mult=2),
@@ -342,7 +370,9 @@ class ConvFFGated(nn.Module):
             nn.Conv1d(dim, dim_inner, ks, padding=ks // 2, padding_mode="reflect"),
             nn.SiLU(),
         )
-        self.linear_v = nn.Sequential(nn.Linear(dim, dim_inner, bias=False), Rearrange("b z c -> b c z"))
+        self.linear_v = nn.Sequential(
+            nn.Linear(dim, dim_inner, bias=False), Rearrange("b z c -> b c z")
+        )
 
         self.lin_out = nn.Sequential(
             Rearrange("b c z -> b z c"),
@@ -376,7 +406,9 @@ class ConvFF(nn.Module):
         return self.net(x)
 
 
-FlashAttentionConfig = namedtuple("FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"])
+FlashAttentionConfig = namedtuple(
+    "FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"]
+)
 
 
 class Attend(nn.Module):
@@ -404,7 +436,12 @@ class Attend(nn.Module):
         #     self.cuda_config = FlashAttentionConfig(False, True, True)
 
     def flash_attn(self, q, k, v):
-        _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
+        _, heads, q_len, _, k_len, is_cuda, device = (
+            *q.shape,
+            k.shape[-2],
+            q.is_cuda,
+            q.device,
+        )
         # Check if there is a compatible device for flash attention
 
         config = self.cuda_config if is_cuda else self.cpu_config
@@ -415,7 +452,9 @@ class Attend(nn.Module):
         # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
         # with torch.backends.cuda.sdp_kernel(**config._asdict()):
         # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
+        out = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.dropout if self.training else 0.0
+        )
 
         return out
 
@@ -432,7 +471,16 @@ class Attend(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, rotary_embed=None, flash=True, norm=False):
+    def __init__(
+        self,
+        dim,
+        heads=8,
+        dim_head=64,
+        dropout=0.0,
+        rotary_embed=None,
+        flash=True,
+        norm=False,
+    ):
         super().__init__()
         self.heads = heads
         self.scale = dim_head**-0.5
@@ -448,12 +496,16 @@ class Attention(nn.Module):
 
         self.to_gates = nn.Linear(dim, heads)
 
-        self.to_out = nn.Sequential(nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout))
+        self.to_out = nn.Sequential(
+            nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout)
+        )
 
     def forward(self, x):
         x = self.norm(x)
 
-        q, k, v = rearrange(self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads)
+        q, k, v = rearrange(
+            self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads
+        )
 
         if self.rotary_embed is not None:
             q = self.rotary_embed.rotate_queries_or_keys(q)
@@ -530,17 +582,34 @@ class ConvNextTr(nn.Module):
         drop_path (float): Stochastic depth rate. Default: 0.0
     """
 
-    def __init__(self, dim_in, dim=None, mult=8, drop_path=0.0, ks=3, rot_emb=None, heads=8, dim_head=64, flash=True):
+    def __init__(
+        self,
+        dim_in,
+        dim=None,
+        mult=8,
+        drop_path=0.0,
+        ks=3,
+        rot_emb=None,
+        heads=8,
+        dim_head=64,
+        flash=True,
+    ):
         if dim is None:
             dim = dim_in
 
         super().__init__()
         self.lin = nn.Conv1d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
 
-        self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash)
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect")
+        self.attend = Attention(
+            dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash
+        )
+        self.dwconv = nn.Conv1d(
+            dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect"
+        )
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(
+            dim, mult * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
@@ -564,7 +633,14 @@ class ConvNextTr(nn.Module):
 
 
 class UnetConvnext(nn.Module):
-    def __init__(self, num_in, dim, dim_mults=(1, 2, 4), residual=False, block=partial(ConvNextBlock2, ks=5)):
+    def __init__(
+        self,
+        num_in,
+        dim,
+        dim_mults=(1, 2, 4),
+        residual=False,
+        block=partial(ConvNextBlock2, ks=5),
+    ):
         super().__init__()
         self.residual = residual
 
@@ -589,7 +665,13 @@ class UnetConvnext(nn.Module):
                         nn.Sequential(
                             block(dim_in, dim_out),
                             Rearrange("b c z -> b z c"),
-                            Transformer(dim=dim_out, depth=1, dim_head=64, heads=heads, rotary_embed=pos_emb),
+                            Transformer(
+                                dim=dim_out,
+                                depth=1,
+                                dim_head=64,
+                                heads=heads,
+                                rotary_embed=pos_emb,
+                            ),
                             Rearrange("b z c -> b c z"),
                             block(dim_out, dim_out),
                         ),
@@ -602,7 +684,9 @@ class UnetConvnext(nn.Module):
         self.mid_block1 = block(mid_dim, mid_dim)
         self.mid_attn = nn.Sequential(
             Rearrange("b c z -> b z c"),
-            Transformer(dim=mid_dim, depth=1, dim_head=64, heads=heads, rotary_embed=pos_embs[-1]),
+            Transformer(
+                dim=mid_dim, depth=1, dim_head=64, heads=heads, rotary_embed=pos_embs[-1]
+            ),
             Rearrange("b z c -> b c z"),
         )
 
@@ -619,11 +703,21 @@ class UnetConvnext(nn.Module):
                         nn.Sequential(
                             block(dim_out * 2, dim_in),
                             Rearrange("b c z -> b z c"),
-                            Transformer(dim=dim_in, depth=1, dim_head=64, heads=heads, rotary_embed=pos_emb),
+                            Transformer(
+                                dim=dim_in,
+                                depth=1,
+                                dim_head=64,
+                                heads=heads,
+                                rotary_embed=pos_emb,
+                            ),
                             Rearrange("b z c -> b c z"),
                             block(dim_in, dim_in),
                         ),
-                        nn.Upsample(scale_factor=2, mode="linear", align_corners=True) if not is_last else nn.Identity(),
+                        (
+                            nn.Upsample(scale_factor=2, mode="linear", align_corners=True)
+                            if not is_last
+                            else nn.Identity()
+                        ),
                     ]
                 )
             )
@@ -682,20 +776,34 @@ class ConvNextEnc(nn.Module):
         drop_path (float): Stochastic depth rate. Default: 0.0
     """
 
-    def __init__(self, dim_in, dim=None, mult=4, ks=3, rot_emb=None, heads=8, dim_head=64, flash=True):
+    def __init__(
+        self, dim_in, dim=None, mult=4, ks=3, rot_emb=None, heads=8, dim_head=64
+    ):
         if dim is None:
             dim = dim_in
 
         super().__init__()
         self.lin = nn.Conv2d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
 
-        # self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash)
-        self.dwconv = nn.Conv2d(dim, dim, kernel_size=(ks, 3), padding=(ks // 2, 1), groups=dim, padding_mode="reflect")
+        # self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb)
+        self.dwconv = nn.Conv2d(
+            dim,
+            dim,
+            kernel_size=(ks, 3),
+            padding=(ks // 2, 1),
+            groups=dim,
+            padding_mode="reflect",
+        )
+        # self.to_ch_last = Rearrange("b c z t -> (b t) z c")
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+
+        self.pwconv1 = nn.Linear(
+            dim, mult * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
+        # self.to_ch_first = Rearrange("(b t) z c -> b c z t", t=3)
         self.identity = nn.Identity() if dim == dim_in else nn.Conv2d(dim_in, dim, 1)
 
     def forward(self, x):
@@ -703,6 +811,7 @@ class ConvNextEnc(nn.Module):
         x = self.lin(x)
         x = self.dwconv(x)
         x = x.permute(0, 2, 3, 1)
+        # x = self.to_ch_last(x)
         # x = self.attend(x)
 
         x = self.norm(x)
@@ -711,6 +820,7 @@ class ConvNextEnc(nn.Module):
         x = self.grn(x)
         x = self.pwconv2(x)
         x = x.permute(0, 3, 1, 2)
+        # x = self.to_ch_first(x)
 
         return x + self.identity(inp)
 
@@ -751,7 +861,11 @@ class XEncoder(nn.Module):
         )
 
         self.blocks = nn.Sequential(
-            *[ConvNextEnc(dim_in if n == 0 else dim, dim, rot_emb=rot_emb) for n in range(depth)] + [nn.Conv2d(dim, dim_in, 1)]
+            *[
+                ConvNextEnc(dim_in if n == 0 else dim, dim, rot_emb=rot_emb)
+                for n in range(depth)
+            ]
+            + [nn.Conv2d(dim, dim_in, 1)]
         )
 
     def forward(self, xp, x1d):
@@ -776,8 +890,8 @@ class Net(nn.Module):
         num_static=5,
         num_3d_start=6,
         num_vert=60,
-        dim=256,
-        depth=10,
+        dim=512,
+        depth=20,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -821,7 +935,7 @@ class Net(nn.Module):
 
         heads = dim // 64
         self.rotary_embed = RotaryEmbedding(dim=dim // heads)
-        self.enc = XEncoder(4, depth, self.rotary_embed, num_in_2d, num_3d_in, num_vert)
+        self.enc = XEncoder(dim, 5, self.rotary_embed, num_in_2d, num_3d_in, num_vert)
 
         self.blocks = nn.Sequential(
             # block(dim),
@@ -836,15 +950,21 @@ class Net(nn.Module):
                 attn_num_mem_kv=16,
                 ff_swish=True,
                 ff_glu=True,
-                attn_talking_heads=False,
+                attn_talking_heads=True,
                 attn_qk_norm=False,  # set to True
+                attn_flash=False,
                 # logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
                 # gate_residual=True,
                 # ff_no_bias = True,
                 # attn_gate_values = True,
-                pre_norm=True,  # in the paper, residual attention had best results with post-layernorm
+                pre_norm=True,
+                sandwich_norm=True,
+                # attn_use_cope=True,
+                # attn_cope_max_pos=16,
+                # attn_cope_soft_onehot_pos=False,  #
+                # in the paper, residual attention had best results with post-layernorm
                 # residual_attn = True,    # add residual attention
                 # qk_norm_dim_scale=True,  # Cosine
                 # macaron = True # Two FFs
@@ -878,7 +998,9 @@ class Net(nn.Module):
             ),
         )
 
-        self.out_2d = nn.Sequential(nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
+        self.out_2d = nn.Sequential(
+            nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
+        )
 
     def forward(self, x):
         # if self.embedding is not None:
