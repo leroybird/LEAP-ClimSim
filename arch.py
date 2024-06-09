@@ -1,6 +1,8 @@
+from re import L
 from ptwt._stationary_transform import _swt
 from collections import namedtuple
-from rotary_embedding_torch import RotaryEmbedding
+
+# from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
 import math
 
@@ -14,7 +16,12 @@ import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
 
-from x_transformers.x_transformers import AttentionLayers
+from x_transformers.x_transformers import (
+    AttentionLayers,
+    Attention,
+    FeedForward,
+    RotaryEmbedding,
+)
 import x_transformers
 
 # from mwt import MWT1d
@@ -26,6 +33,8 @@ from torch.nn.attention import SDPBackend
 # Enable TFfloat32
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+
+torch._dynamo.config.cache_size_limit = 256
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -342,21 +351,21 @@ class RMSNorm(nn.Module):
         return F.normalize(x, dim=-1) * self.scale * self.gamma
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, mult=4, dropout=0.0):
-        super().__init__()
-        dim_inner = int(dim * mult)
-        self.net = nn.Sequential(
-            RMSNorm(dim),
-            nn.Linear(dim, dim_inner),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim_inner, dim),
-            nn.Dropout(dropout),
-        )
+# class FeedForward(nn.Module):
+#     def __init__(self, dim, mult=4, dropout=0.0):
+#         super().__init__()
+#         dim_inner = int(dim * mult)
+#         self.net = nn.Sequential(
+#             RMSNorm(dim),
+#             nn.Linear(dim, dim_inner),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(dim_inner, dim),
+#             nn.Dropout(dropout),
+#         )
 
-    def forward(self, x):
-        return self.net(x)
+#     def forward(self, x):
+#         return self.net(x)
 
 
 class ConvFFGated(nn.Module):
@@ -405,118 +414,118 @@ class ConvFF(nn.Module):
         return self.net(x)
 
 
-FlashAttentionConfig = namedtuple(
-    "FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"]
-)
+# FlashAttentionConfig = namedtuple(
+#     "FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"]
+# )
 
 
-class Attend(nn.Module):
-    def __init__(self, dropout=0.0, flash=False, scale=None):
-        super().__init__()
-        self.scale = scale
-        self.dropout = dropout
-        self.attn_dropout = nn.Dropout(dropout)
+# class Attend(nn.Module):
+#     def __init__(self, dropout=0.0, flash=False, scale=None):
+#         super().__init__()
+#         self.scale = scale
+#         self.dropout = dropout
+#         self.attn_dropout = nn.Dropout(dropout)
 
-        # determine efficient attention configs for cuda and cpu
+#         # determine efficient attention configs for cuda and cpu
 
-        self.cpu_config = FlashAttentionConfig(True, True, True)
-        self.cuda_config = None
+#         self.cpu_config = FlashAttentionConfig(True, True, True)
+#         self.cuda_config = None
 
-        if not torch.cuda.is_available() or not flash:
-            return
+#         if not torch.cuda.is_available() or not flash:
+#             return
 
-        device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
+#         device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
 
-        # if device_properties.major == 8 and device_properties.minor == 0:
-        #     print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
-        self.cuda_config = FlashAttentionConfig(True, False, False)
-        # else:
-        #     print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
-        #     self.cuda_config = FlashAttentionConfig(False, True, True)
+#         # if device_properties.major == 8 and device_properties.minor == 0:
+#         #     print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
+#         self.cuda_config = FlashAttentionConfig(True, False, False)
+#         # else:
+#         #     print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
+#         #     self.cuda_config = FlashAttentionConfig(False, True, True)
 
-    def flash_attn(self, q, k, v):
-        _, heads, q_len, _, k_len, is_cuda, device = (
-            *q.shape,
-            k.shape[-2],
-            q.is_cuda,
-            q.device,
-        )
-        # Check if there is a compatible device for flash attention
+#     def flash_attn(self, q, k, v):
+#         _, heads, q_len, _, k_len, is_cuda, device = (
+#             *q.shape,
+#             k.shape[-2],
+#             q.is_cuda,
+#             q.device,
+#         )
+#         # Check if there is a compatible device for flash attention
 
-        config = self.cuda_config if is_cuda else self.cpu_config
+#         config = self.cuda_config if is_cuda else self.cpu_config
 
-        # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
-        # print(q.shape, k.shape, v.shape)
+#         # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
+#         # print(q.shape, k.shape, v.shape)
 
-        # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
-        # with torch.backends.cuda.sdp_kernel(**config._asdict()):
-        # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-        out = F.scaled_dot_product_attention(
-            q, k, v, dropout_p=self.dropout if self.training else 0.0
-        )
+#         # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
+#         # with torch.backends.cuda.sdp_kernel(**config._asdict()):
+#         # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+#         out = F.scaled_dot_product_attention(
+#             q, k, v, dropout_p=self.dropout if self.training else 0.0
+#         )
 
-        return out
+#         return out
 
-    def forward(self, q, k, v):
-        """
-        einstein notation
-        b - batch
-        h - heads
-        n, i, j - sequence length (base sequence length, source, target)
-        d - feature dimension
-        """
+#     def forward(self, q, k, v):
+#         """
+#         einstein notation
+#         b - batch
+#         h - heads
+#         n, i, j - sequence length (base sequence length, source, target)
+#         d - feature dimension
+#         """
 
-        return self.flash_attn(q, k, v)
+#         return self.flash_attn(q, k, v)
 
 
-class Attention(nn.Module):
-    def __init__(
-        self,
-        dim,
-        heads=8,
-        dim_head=64,
-        dropout=0.0,
-        rotary_embed=None,
-        flash=True,
-        norm=False,
-    ):
-        super().__init__()
-        self.heads = heads
-        self.scale = dim_head**-0.5
-        dim_inner = heads * dim_head
+# class Attention(nn.Module):
+#     def __init__(
+#         self,
+#         dim,
+#         heads=8,
+#         dim_head=64,
+#         dropout=0.0,
+#         rotary_embed=None,
+#         flash=True,
+#         norm=False,
+#     ):
+#         super().__init__()
+#         self.heads = heads
+#         self.scale = dim_head**-0.5
+#         dim_inner = heads * dim_head
 
-        self.rotary_embed = rotary_embed
+#         self.rotary_embed = rotary_embed
 
-        self.attend = Attend(flash=flash, dropout=dropout)
+#         self.attend = Attend(flash=flash, dropout=dropout)
 
-        self.norm = RMSNorm(dim) if norm else nn.Identity()
+#         self.norm = RMSNorm(dim) if norm else nn.Identity()
 
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
+#         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
 
-        self.to_gates = nn.Linear(dim, heads)
+#         self.to_gates = nn.Linear(dim, heads)
 
-        self.to_out = nn.Sequential(
-            nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout)
-        )
+#         self.to_out = nn.Sequential(
+#             nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout)
+#         )
 
-    def forward(self, x):
-        x = self.norm(x)
+#     def forward(self, x):
+#         x = self.norm(x)
 
-        q, k, v = rearrange(
-            self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads
-        )
+#         q, k, v = rearrange(
+#             self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads
+#         )
 
-        if self.rotary_embed is not None:
-            q = self.rotary_embed.rotate_queries_or_keys(q)
-            k = self.rotary_embed.rotate_queries_or_keys(k)
+#         if self.rotary_embed is not None:
+#             q = self.rotary_embed.rotate_queries_or_keys(q)
+#             k = self.rotary_embed.rotate_queries_or_keys(k)
 
-        out = self.attend(q, k, v)
+#         out = self.attend(q, k, v)
 
-        gates = self.to_gates(x)
-        out = out * rearrange(gates, "b n h -> b h n 1").sigmoid()
+#         gates = self.to_gates(x)
+#         out = out * rearrange(gates, "b n h -> b h n 1").sigmoid()
 
-        out = rearrange(out, "b h n d -> b n (h d)")
-        return self.to_out(out)
+#         out = rearrange(out, "b h n d -> b n (h d)")
+#         return self.to_out(out)
 
 
 class Transformer(nn.Module):
@@ -831,6 +840,123 @@ class ConvNextEnc(nn.Module):
             return x
 
 
+class AttendRot(nn.Module):
+    def __init__(self, *, rot_emb, **kwargs):
+        super().__init__()
+        self.rot_emb = rot_emb
+        self.attend = Attention(**kwargs)
+
+    def forward(self, x):
+        pos = torch.arange(x.shape[1], device=x.device)
+        rotary_pos_emb = self.rot_emb(pos)
+
+        return self.attend(x, rotary_pos_emb=rotary_pos_emb)
+
+
+class XTrEncoder(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        depth: int,
+        num_in_2d,
+        num_3d_in,
+        num_vert=60,
+        num_cond=27,  # 9 positions, *3 time steps
+        pos_emb_ch=9
+    ):
+        super().__init__()
+        mult_fac_2d = 1
+
+        dim_in = dim // 2
+        dim = dim // 2
+        self.pos_emb_ch = pos_emb_ch
+
+        self.rot_emb = RotaryEmbedding(dim=64)
+        
+        self.layer_2d_3d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange("b (c z) t -> b c z t", c=num_in_2d * mult_fac_2d, z=num_vert),
+        )
+
+        self.layer_3d = nn.Sequential(
+            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+            nn.Conv2d(
+                num_3d_in,
+                dim_in - num_in_2d * mult_fac_2d,
+                kernel_size=1,
+            ),
+        )
+        self.proj = Rearrange(
+            "b c z t -> b z t c"
+        )  # nn.Identity()  # nn.Conv1d(dim_in, dim, 1)
+
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        nn.Linear(pos_emb_ch, dim),
+                        nn.Sequential(
+                            Rearrange("b z t c -> (b z) t c"),
+                            Attention(
+                                dim,
+                                heads=dim // 64,
+                                dim_head=64,
+                                talking_heads=True,
+                            ),
+                            Rearrange("(b z) t c -> b z t c", z=num_vert),
+                        ),
+                        nn.Sequential(
+                            Rearrange("b z t c -> (b t) z c"),
+                            AttendRot(
+                                dim=dim,
+                                heads=dim // 64,
+                                dim_head=64,
+                                talking_heads=True,
+                                rot_emb=self.rot_emb,
+                            ),
+                            Rearrange("(b t) z c -> b z t c", t=num_cond),
+                        ),
+                        FeedForward(
+                            dim,
+                            mult=2,
+                            glu=False,
+                            swish=False,
+                        ),
+                    ]
+                )
+                for n in range(depth)
+            ]
+        )
+        self.out = Rearrange("b z t c -> b c z t")
+
+        # nn.Identity()  # nn.Conv1d(dim, dim_in, 1)
+
+    def forward(self, xp, x1d):
+        xp = self.layer_2d_3d(xp)
+        x1d = self.layer_3d(x1d)
+
+        x_enc = torch.cat((x1d, xp), dim=1)
+        x_m = x_enc[..., 0]
+
+        x = self.proj(x_enc)
+        x_emb = x[..., -self.pos_emb_ch:]
+        
+        for pos_emb, attn1, attn2, ff in self.blocks:
+            x1 = attn1(x + pos_emb(x_emb))
+            x2 = attn2(x)
+            x = ff(x1 + x2) + x
+
+        x = self.out(x)
+        x = x[..., 0]
+
+        return torch.cat((x, x_m), dim=1)
+
+
 class XEncoder(nn.Module):
 
     def __init__(
@@ -944,8 +1070,8 @@ class Net(nn.Module):
         # )
 
         heads = dim // 64
-        self.rotary_embed = RotaryEmbedding(dim=dim // heads)
-        self.enc = XEncoder(dim, 5, self.rotary_embed, num_in_2d, num_3d_in, num_vert)
+        # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
+        self.enc = XTrEncoder(dim, 3, num_in_2d, num_3d_in, num_vert)
 
         self.blocks = nn.Sequential(
             # block(dim),
