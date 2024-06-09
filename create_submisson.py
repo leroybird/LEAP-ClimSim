@@ -1,5 +1,4 @@
 # %%
-from cvxpy import diff
 import polars as pl
 import torch
 import norm
@@ -7,7 +6,7 @@ import config
 import numpy as np
 import pandas as pd
 # %%
-input_fname = "output_time_v2.pt"
+input_fname = "output_time.pt"
 fill_df = pl.read_csv("output_base_v1.csv").to_pandas()
 weights = torch
 offset = 384

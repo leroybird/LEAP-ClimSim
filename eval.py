@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import argparse
 import config
 import norm
-import pytorch_lightning as L
+import lightning as L
 import xarray as xr
 from dataloader import get_static
 
@@ -79,16 +79,14 @@ class EvalLoaderTime(Dataset):
         x0, _ = self.get_data(l_idx)
         x1, y = self.get_data(c_idx)
         x2, _ = self.get_data(c_idx + self.num_grid_cells)
-        return np.concatenate([x0, x1, x2], axis=0).astype(np.float32)
+        return np.stack([x0, x1, x2], axis=-1).astype(np.float32)
 
     def __len__(self):
         return self.data_dict["x"].shape[0] - self.offset * 2
 
 
 def get_predictions(model, test_loader):
-    trainer = L.Trainer(
-        precision=16,
-    )
+    trainer = L.Trainer()
     preds = trainer.predict(
         model,
         test_loader,
@@ -144,7 +142,14 @@ if __name__ == "__main__":
     else:
         test_ds = EvalLoaderTime({"x": x_test}, {"x": norm_x})
 
-    test_loader = DataLoader(test_ds, batch_size=args.bs, drop_last=False, shuffle=False, num_workers=0, pin_memory=True)
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=args.bs,
+        drop_last=False,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=True,
+    )
 
     preds = get_predictions(lit_model, test_loader)
     for i, zeroed in enumerate(norm_y.zero_mask):

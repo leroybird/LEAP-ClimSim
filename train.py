@@ -93,7 +93,7 @@ class LitModel(L.LightningModule):
                 cfg_loader, cfg_data
             )
 
-        self.loss_func = nn.HuberLoss(delta=2.0)
+        self.loss_func = nn.HuberLoss(delta=8.0)
         self.val_metrics = [
             fv.mae,
             fv.mse,
@@ -116,9 +116,9 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 1e-3
-        self.scheduler_steps = 600_000
-        self.use_schedulefree = True
+        self.learning_rate = 1e-5
+        self.scheduler_steps = 200_000
+        self.use_schedulefree = False
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
 
@@ -199,7 +199,9 @@ class LitModel(L.LightningModule):
             self.opt = opt
             return opt
         else:
-            opt = torch.optim.SGD(self.model.parameters(), lr=self.learning_rate)
+            opt = torch.optim.AdamW(
+                self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5
+            )
 
             # opt = torch.optim.AdamW(
             #     self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001
@@ -295,7 +297,7 @@ if __name__ == "__main__":
         val_check_interval=20000,
         callbacks=callbacks,
         enable_model_summary=True,
-        #precision="bf16-mixed",
+        # precision="bf16-mixed",
         gradient_clip_val=1.0,
     )
 
