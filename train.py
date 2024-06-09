@@ -77,7 +77,7 @@ def mse_point(pred, tar):
 
 class LitModel(L.LightningModule):
     def __init__(
-        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=True
+        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False
     ):
         super().__init__()
 
@@ -93,7 +93,7 @@ class LitModel(L.LightningModule):
                 cfg_loader, cfg_data
             )
 
-        self.loss_func = nn.HuberLoss(delta=8.0)
+        self.loss_func = nn.HuberLoss(delta=2.0)
         self.val_metrics = [
             fv.mae,
             fv.mse,
@@ -116,9 +116,9 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 1e-5
+        self.learning_rate = 1e-3
         self.scheduler_steps = 200_000
-        self.use_schedulefree = False
+        self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
 
@@ -280,7 +280,7 @@ if __name__ == "__main__":
             filename="model-{step:06d}-{val_mse:.3f}",
             save_top_k=3,
             mode="min",
-            save_weights_only=True,
+            save_weights_only=False,
         )
         callbacks.append(checkpoint_callback)
 

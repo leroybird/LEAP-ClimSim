@@ -1,6 +1,4 @@
 # %%
-from math import dist
-from typing import Tuple
 import xarray as xr
 import matplotlib.pyplot as plt
 import numpy as np
@@ -78,15 +76,15 @@ for idx in range(len(lats)):
         (lats[idx], lons[idx]), (lats[idxs], lons[idxs]), (lats[idx], lons[idx])
     )
 
-    output_ds["distances"][-1].append(closes_distances)
-    output_ds["x_distances"][-1].append(x_dist)
-    output_ds["y_distances"][-1].append(y_dist)
-    output_ds["idxs"][-1].append(idxs)
+    # output_ds["distances"][-1].append(closes_distances)
+    # output_ds["x_distances"][-1].append(x_dist)
+    # output_ds["y_distances"][-1].append(y_dist)
+    # output_ds["idxs"][-1].append(idxs)
 
-    # plt.scatter(x_dist, y_dist, color=["red" if i == idx else "blue" for i in idxs],
-    #             )
-    # plt.grid()
-    # plt.show()
+    plt.scatter(x_dist, y_dist, color=["red" if i == idx else "blue" for i in idxs],
+                )
+    plt.grid()
+    plt.show()
 # %%
 ds_out = xr.Dataset(
     output_ds,

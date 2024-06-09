@@ -29,6 +29,7 @@ class LeapLoader:
         root_folder: Path,
         grid_info_path,
         df,
+        grid_neighbours_path=Path("__file__").parent / "neighbours.nc",
         x_transform=None,
         y_transform=None,
         add_static=True,
@@ -50,24 +51,42 @@ class LeapLoader:
         self.grid_info = xr.open_dataset(grid_info_path).load()
         self.grid_info.close()
 
+        self.neighbours = xr.open_dataset(grid_neighbours_path).load()
+        self.neighbours.close()
+
         self.level_name = "lev"
         self.sample_name = "sample"
         self.num_levels = len(self.grid_info["lev"])
-        self.num_latlon = len(self.grid_info["ncol"])  # number of unique lat/lon grid points
+        self.num_latlon = len(
+            self.grid_info["ncol"]
+        )  # number of unique lat/lon grid points
 
         # make area-weights
-        self.grid_info["area_wgt"] = self.grid_info["area"] / self.grid_info["area"].mean(dim="ncol")
+        self.grid_info["area_wgt"] = self.grid_info["area"] / self.grid_info["area"].mean(
+            dim="ncol"
+        )
         self.area_wgt = self.grid_info["area_wgt"].values
         # map ncol to nsamples dimension
         # to_xarray = {'area_wgt':(self.sample_name,np.tile(self.grid_info['area_wgt'], int(n_samples/len(self.grid_info['ncol']))))}
         # to_xarray = xr.Dataset(to_xarray)
         self.normalize = True
-        self.lats, self.lats_indices = np.unique(self.grid_info["lat"].values, return_index=True)
-        self.lons, self.lons_indices = np.unique(self.grid_info["lon"].values, return_index=True)
-        self.sort_lat_key = np.argsort(self.grid_info["lat"].values[np.sort(self.lats_indices)])
-        self.sort_lon_key = np.argsort(self.grid_info["lon"].values[np.sort(self.lons_indices)])
+        self.lats, self.lats_indices = np.unique(
+            self.grid_info["lat"].values, return_index=True
+        )
+        self.lons, self.lons_indices = np.unique(
+            self.grid_info["lon"].values, return_index=True
+        )
+        self.sort_lat_key = np.argsort(
+            self.grid_info["lat"].values[np.sort(self.lats_indices)]
+        )
+        self.sort_lon_key = np.argsort(
+            self.grid_info["lon"].values[np.sort(self.lons_indices)]
+        )
         self.indextolatlon = {
-            i: (self.grid_info["lat"].values[i % self.num_latlon], self.grid_info["lon"].values[i % self.num_latlon])
+            i: (
+                self.grid_info["lat"].values[i % self.num_latlon],
+                self.grid_info["lon"].values[i % self.num_latlon],
+            )
             for i in range(self.num_latlon)
         }
 
@@ -123,14 +142,23 @@ class LeapLoader:
         self.lv = 2.501e6  # latent heat of evaporation ~ J/kg
         self.lf = 3.337e5  # latent heat of fusion      ~ J/kg
         self.lsub = self.lv + self.lf  # latent heat of sublimation ~ J/kg
-        self.rho_air = 101325 / (6.02214e26 * 1.38065e-23 / 28.966) / 273.15  # density of dry air at STP  ~ kg/m^3
+        self.rho_air = (
+            101325 / (6.02214e26 * 1.38065e-23 / 28.966) / 273.15
+        )  # density of dry air at STP  ~ kg/m^3
         # ~ 1.2923182846924677
         # SHR_CONST_PSTD/(SHR_CONST_RDAIR*SHR_CONST_TKFRZ)
         # SHR_CONST_RDAIR   = SHR_CONST_RGAS/SHR_CONST_MWDAIR
         # SHR_CONST_RGAS    = SHR_CONST_AVOGAD*SHR_CONST_BOLTZ
         self.rho_h20 = 1.0e3  # density of fresh water     ~ kg/m^ 3
 
-        self.v1_inputs = ["state_t", "state_q0001", "state_ps", "pbuf_SOLIN", "pbuf_LHFLX", "pbuf_SHFLX"]
+        self.v1_inputs = [
+            "state_t",
+            "state_q0001",
+            "state_ps",
+            "pbuf_SOLIN",
+            "pbuf_LHFLX",
+            "pbuf_SHFLX",
+        ]
 
         self.v1_outputs = [
             "ptend_t",
@@ -358,16 +386,30 @@ class LeapLoader:
         """
         # read inputs
         ds_input = self.get_input(input_file)
-        ds_target = self.get_xrdata(input_file.parent / input_file.name.replace(".mli.", ".mlo."))
+        ds_target = self.get_xrdata(
+            input_file.parent / input_file.name.replace(".mli.", ".mlo.")
+        )
 
         # each timestep is 20 minutes which corresponds to 1200 seconds
-        ds_target["ptend_t"] = (ds_target["state_t"] - ds_input["state_t"]) / 1200  # T tendency [K/s]
-        ds_target["ptend_q0001"] = (ds_target["state_q0001"] - ds_input["state_q0001"]) / 1200  # Q tendency [kg/kg/s]
+        ds_target["ptend_t"] = (
+            ds_target["state_t"] - ds_input["state_t"]
+        ) / 1200  # T tendency [K/s]
+        ds_target["ptend_q0001"] = (
+            ds_target["state_q0001"] - ds_input["state_q0001"]
+        ) / 1200  # Q tendency [kg/kg/s]
         if self.full_vars:
-            ds_target["ptend_q0002"] = (ds_target["state_q0002"] - ds_input["state_q0002"]) / 1200  # Q tendency [kg/kg/s]
-            ds_target["ptend_q0003"] = (ds_target["state_q0003"] - ds_input["state_q0003"]) / 1200  # Q tendency [kg/kg/s]
-            ds_target["ptend_u"] = (ds_target["state_u"] - ds_input["state_u"]) / 1200  # U tendency [m/s/s]
-            ds_target["ptend_v"] = (ds_target["state_v"] - ds_input["state_v"]) / 1200  # V tendency [m/s/s]
+            ds_target["ptend_q0002"] = (
+                ds_target["state_q0002"] - ds_input["state_q0002"]
+            ) / 1200  # Q tendency [kg/kg/s]
+            ds_target["ptend_q0003"] = (
+                ds_target["state_q0003"] - ds_input["state_q0003"]
+            ) / 1200  # Q tendency [kg/kg/s]
+            ds_target["ptend_u"] = (
+                ds_target["state_u"] - ds_input["state_u"]
+            ) / 1200  # U tendency [m/s/s]
+            ds_target["ptend_v"] = (
+                ds_target["state_v"] - ds_input["state_v"]
+            ) / 1200  # V tendency [m/s/s]
         ds_target = ds_target[self.target_vars]
 
         return ds_input, ds_target
@@ -399,12 +441,16 @@ class LeapLoader:
         # stack
         # ds = ds.stack({'batch':{'sample','ncol'}})
         ds_input = ds_input.stack({"batch": {"ncol"}})
-        ds_input = ds_input.to_stacked_array("mlvar", sample_dims=["batch"], name="mli").values
+        ds_input = ds_input.to_stacked_array(
+            "mlvar", sample_dims=["batch"], name="mli"
+        ).values
 
         # dso = dso.stack({'batch':{'sample','ncol'}})
         if ds_target is not None:
             ds_target = ds_target.stack({"batch": {"ncol"}})
-            ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo").values
+            ds_target = ds_target.to_stacked_array(
+                "mlvar", sample_dims=["batch"], name="mlo"
+            ).values
 
         if self.add_static:
             static_data = get_static(self.grid_info)
@@ -417,13 +463,36 @@ class LeapLoader:
 
         return ds_input, ds_target
 
+    def get_data_neighbours(self, idx, key="path"):
+        x_all, y_all = self.get_data(idx, key=key)
+        x_nei = x_all[self.neighbours["idxs"].values, :]
+        assert (x_nei[:, 0] == x_all).all()
+
+        # Set the ranges between -1 and 1
+        y_dist = self.neighbours["y_distances"].values[..., None] / 1975267.0
+        x_dist = self.neighbours["x_distances"].values[..., None] / 1975267.0
+        dist_norm = self.neighbours["distances"].values[..., None] / 2035.0
+
+        match key:
+            case "path":
+                time_emb = np.zeros_like(dist_norm)
+            case "prev_path":
+                time_emb = -np.ones_like(dist_norm)
+            case "next_path":
+                time_emb = np.ones_like(dist_norm)
+
+        x_nei = np.concatenate([x_nei, y_dist, x_dist, dist_norm, time_emb], axis=-1).astype(np.float32)
+        return x_nei, y_all
+
     def __getitem__(self, idx):
+
         if self.multi_step:
-            x0, _ = self.get_data(idx, key="prev_path")
-            x1, y = self.get_data(idx, key="path")
-            x2, _ = self.get_data(idx, key="next_path")
-            # B ch T
-            return np.stack([x0, x1, x2], axis=-1), y
+            x0, _ = self.get_data_neighbours(idx, key="prev_path")
+            x1, y = self.get_data_neighbours(idx, key="path")
+            x2, _ = self.get_data_neighbours(idx, key="next_path")
+
+            # x1 first so x1[:,0] is the target
+            return np.concatenate([x1, x0, x2], axis=1), y
         else:
             return self.get_data(idx)
 
@@ -460,7 +529,9 @@ class IterableDataset(torch.utils.data.IterableDataset):
         else:
             iter_idx = worker_info.id
 
-        idxs = get_idxs(len(self.inner_ds), self.num_workers, self.seed + self.total_iterations)
+        idxs = get_idxs(
+            len(self.inner_ds), self.num_workers, self.seed + self.total_iterations
+        )
 
         for idx in idxs[iter_idx]:
             # Each inner dataset contains 384 unique grid points
@@ -470,8 +541,12 @@ class IterableDataset(torch.utils.data.IterableDataset):
 
             random_sample = np.random.permutation(self.grid_points)
             for n in range(self.inner_rep):
-                ds_x = ds_x_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
-                ds_y = ds_y_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
+                ds_x = ds_x_inner[
+                    random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+                ]
+                ds_y = ds_y_inner[
+                    random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+                ]
                 yield ds_x, ds_y
 
     def __iter__(self):

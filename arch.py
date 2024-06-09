@@ -3,16 +3,15 @@ from collections import namedtuple
 from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
 import math
-import numpy as np
 
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange
 import pandas as pd
 from torchvision.ops import Permute
 import torch.nn.functional as F
-from typing import Callable, Optional, List, final
+from typing import Callable, Optional
 import torch
-from torch import Block, nn, Tensor
+from torch import nn, Tensor
 from torch.nn import functional as F
 
 from x_transformers.x_transformers import AttentionLayers
@@ -769,15 +768,18 @@ class WaveLetBlock(nn.Module):
 
 
 class ConvNextEnc(nn.Module):
-    """ConvNeXtV2 Block + Attention.
-
-    Args:
-        dim (int): Number of input channels.
-        drop_path (float): Stochastic depth rate. Default: 0.0
-    """
+    """ConvNeXtV2 Block + Attention."""
 
     def __init__(
-        self, dim_in, dim=None, mult=4, ks=3, rot_emb=None, heads=8, dim_head=64
+        self,
+        dim_in,
+        dim=None,
+        use_x_enc=True,
+        mult=4,
+        ks=27,
+        rot_emb=None,
+        heads=8,
+        dim_head=64,
     ):
         if dim is None:
             dim = dim_in
@@ -789,32 +791,33 @@ class ConvNextEnc(nn.Module):
         self.dwconv = nn.Conv2d(
             dim,
             dim,
-            kernel_size=(ks, 3),
-            padding=(ks // 2, 1),
+            kernel_size=(1, ks),
+            # padding=(ks // 2, 1),
             groups=dim,
             padding_mode="reflect",
         )
         # self.to_ch_last = Rearrange("b c z t -> (b t) z c")
-        self.norm = LayerNorm(dim, eps=1e-6)
+        self.norm = LayerNorm(dim * 2 if use_x_enc else dim, eps=1e-6)
 
-        self.pwconv1 = nn.Linear(
-            dim, mult * dim
-        )  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(dim * 2 if use_x_enc else dim, mult * dim)
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
-        # self.to_ch_first = Rearrange("(b t) z c -> b c z t", t=3)
-        self.identity = nn.Identity() if dim == dim_in else nn.Conv2d(dim_in, dim, 1)
 
-    def forward(self, x):
-        inp = x
+        # self.identity = nn.Identity() if dim == dim_in else nn.Conv2d(dim_in, dim, 1)
+
+    def forward(self, x, x_enc=None):
         x = self.lin(x)
         x = self.dwconv(x)
         x = x.permute(0, 2, 3, 1)
+
+        if x_enc is not None:
+            x = torch.cat((x, x_enc.permute(0, 2, 3, 1)), dim=-1)
+        x = self.norm(x)
+
         # x = self.to_ch_last(x)
         # x = self.attend(x)
 
-        x = self.norm(x)
         x = self.pwconv1(x)
         x = self.act(x)
         x = self.grn(x)
@@ -822,7 +825,10 @@ class ConvNextEnc(nn.Module):
         x = x.permute(0, 3, 1, 2)
         # x = self.to_ch_first(x)
 
-        return x + self.identity(inp)
+        if x_enc is not None:
+            return x + x_enc
+        else:
+            return x
 
 
 class XEncoder(nn.Module):
@@ -860,22 +866,26 @@ class XEncoder(nn.Module):
             ),
         )
 
-        self.blocks = nn.Sequential(
-            *[
-                ConvNextEnc(dim_in if n == 0 else dim, dim, rot_emb=rot_emb)
+        self.blocks = nn.ModuleList(
+            [
+                ConvNextEnc(dim_in, dim, rot_emb=rot_emb, use_x_enc=n > 0)
                 for n in range(depth)
             ]
-            + [nn.Conv2d(dim, dim_in, 1)]
         )
+        self.out = nn.Conv1d(dim, dim_in, 1)
 
     def forward(self, xp, x1d):
         xp = self.layer_2d_3d(xp)
         x1d = self.layer_3d(x1d)
 
         x_enc = torch.cat((xp, x1d), dim=1)
-        x_m = x_enc[..., 1]
+        x_m = x_enc[..., 0]
 
-        x = self.blocks(x_enc)[..., 1]
+        x = None
+        for b in self.blocks:
+            x = b(x_enc, x)
+        x = x[..., 0]
+        x = self.out(x)
 
         return torch.cat((x, x_m), dim=1)
 
@@ -887,11 +897,11 @@ class Net(nn.Module):
         num_3d_in,
         num_2d_out,
         num_3d_out,
-        num_static=5,
+        num_static=9,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=20,
+        dim=256,
+        depth=12,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -974,7 +984,7 @@ class Net(nn.Module):
         )
 
         self.final_mult = 16
-        out_3d = num_3d_out * self.final_mult * num_vert
+        # out_3d = num_3d_out * self.final_mult * num_vert
 
         # self.out_3d = nn.Sequential(Block(dim),
         #                             nn.Conv1d(dim, num_3d_out*self.final_mult, 1),
@@ -1030,7 +1040,7 @@ class Net(nn.Module):
 
 
 def split_data(x, split_idx, num_2d_in, num_static):
-    # create a time dim
+    x = rearrange(x, "b t c -> b c t").contiguous()
 
     # Data contains 1d vars, point vars, then 1d, then static vars...
     x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
