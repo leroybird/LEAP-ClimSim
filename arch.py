@@ -403,11 +403,11 @@ class ConvFF(nn.Module):
         dim_inner = int(dim * mult)
         self.net = nn.Sequential(
             RMSNorm(dim) if norm else nn.Identity(),
-            Rearrange("b z c -> b c z"),
+            Rearrange("b z t c -> (b t) c z"),
             nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
             nn.GELU(),
             nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
-            Rearrange("b c z -> b z c"),
+            Rearrange("(b t) c z -> b z t c", t=27),
         )
 
     def forward(self, x):
@@ -808,7 +808,7 @@ class ConvNextEnc(nn.Module):
         # self.to_ch_last = Rearrange("b c z t -> (b t) z c")
         self.norm = LayerNorm(dim * 2 if use_x_enc else dim, eps=1e-6)
 
-        self.pwconv1 = nn.Linear(dim * 2 if use_x_enc else dim, mult * dim)
+        self.pwconv1 = nn.Linear((dim * 2 if use_x_enc else dim), mult * dim)
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
@@ -862,7 +862,7 @@ class XTrEncoder(nn.Module):
         num_3d_in,
         num_vert=60,
         num_cond=27,  # 9 positions, *3 time steps
-        pos_emb_ch=9
+        pos_emb_ch=9,
     ):
         super().__init__()
         mult_fac_2d = 1
@@ -872,7 +872,7 @@ class XTrEncoder(nn.Module):
         self.pos_emb_ch = pos_emb_ch
 
         self.rot_emb = RotaryEmbedding(dim=64)
-        
+
         self.layer_2d_3d = nn.Sequential(
             nn.Conv1d(
                 num_in_2d,
@@ -910,22 +910,22 @@ class XTrEncoder(nn.Module):
                             ),
                             Rearrange("(b z) t c -> b z t c", z=num_vert),
                         ),
-                        nn.Sequential(
-                            Rearrange("b z t c -> (b t) z c"),
-                            AttendRot(
-                                dim=dim,
-                                heads=dim // 64,
-                                dim_head=64,
-                                talking_heads=True,
-                                rot_emb=self.rot_emb,
-                            ),
-                            Rearrange("(b t) z c -> b z t c", t=num_cond),
-                        ),
-                        FeedForward(
+                        # nn.Sequential(
+                        #     Rearrange("b z t c -> (b t) z c"),
+                        #     AttendRot(
+                        #         dim=dim,
+                        #         heads=dim // 64,
+                        #         dim_head=64,
+                        #         talking_heads=True,
+                        #         rot_emb=self.rot_emb,
+                        #     ),
+                        #     Rearrange("(b t) z c -> b z t c", t=num_cond),
+                        # ),
+                        ConvFF(
                             dim,
                             mult=2,
-                            glu=False,
-                            swish=False,
+                            # glu=False,
+                            # swish=False,
                         ),
                     ]
                 )
@@ -944,12 +944,12 @@ class XTrEncoder(nn.Module):
         x_m = x_enc[..., 0]
 
         x = self.proj(x_enc)
-        x_emb = x[..., -self.pos_emb_ch:]
-        
-        for pos_emb, attn1, attn2, ff in self.blocks:
+        x_emb = x[..., -self.pos_emb_ch :]
+
+        for pos_emb, attn1, ff in self.blocks:
             x1 = attn1(x + pos_emb(x_emb))
-            x2 = attn2(x)
-            x = ff(x1 + x2) + x
+            # x2 = attn2(x)
+            x = ff(x1) + x
 
         x = self.out(x)
         x = x[..., 0]
@@ -959,19 +959,14 @@ class XTrEncoder(nn.Module):
 
 class XEncoder(nn.Module):
 
-    def __init__(
-        self,
-        dim: int,
-        depth: int,
-        rot_emb,
-        num_in_2d,
-        num_3d_in,
-        num_vert=60,
-    ):
+    def __init__(self, dim: int, depth: int, num_in_2d, num_3d_in, num_vert=60, emb_in=5):
         super().__init__()
         mult_fac_2d = 1
         dim_in = dim // 2
-        self.rot_emb = rot_emb
+
+        emb_dim = 32
+        self.emb_in = emb_in
+        self.emb = nn.Conv2d(emb_in, emb_dim, 1, 1)
 
         self.layer_2d_3d = nn.Sequential(
             nn.Conv1d(
@@ -987,16 +982,13 @@ class XEncoder(nn.Module):
             Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
             nn.Conv2d(
                 num_3d_in,
-                dim_in - num_in_2d * mult_fac_2d,
+                dim_in - num_in_2d * mult_fac_2d - emb_dim,
                 kernel_size=1,
             ),
         )
 
         self.blocks = nn.ModuleList(
-            [
-                ConvNextEnc(dim_in, dim, rot_emb=rot_emb, use_x_enc=n > 0)
-                for n in range(depth)
-            ]
+            [ConvNextEnc(dim_in, dim, use_x_enc=n > 0, mult=2) for n in range(depth)]
         )
         self.out = nn.Conv1d(dim, dim_in, 1)
 
@@ -1004,7 +996,7 @@ class XEncoder(nn.Module):
         xp = self.layer_2d_3d(xp)
         x1d = self.layer_3d(x1d)
 
-        x_enc = torch.cat((xp, x1d), dim=1)
+        x_enc = torch.cat((xp, x1d, self.emb(xp[:, -self.emb_in :])), dim=1)
         x_m = x_enc[..., 0]
 
         x = None
@@ -1023,11 +1015,11 @@ class Net(nn.Module):
         num_3d_in,
         num_2d_out,
         num_3d_out,
-        num_static=9,
+        num_static=0,
         num_3d_start=6,
         num_vert=60,
-        dim=256,
-        depth=12,
+        dim=512,
+        depth=20,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -1038,13 +1030,13 @@ class Net(nn.Module):
         super().__init__()
         self.num_2d_in = num_in_2d
         self.num_static = num_static
-        num_in_2d = num_in_2d + num_static
+        num_in_2d = num_in_2d
 
-        if use_emb:
-            self.embedding = nn.Embedding(num_emb, emb_ch)
-            num_in_2d += emb_ch
-        else:
-            self.embedding = None
+        # if use_emb:
+        #     self.embedding = nn.Embedding(num_emb, emb_ch)
+        #     num_in_2d += emb_ch
+        # else:
+        #     self.embedding = None
 
         self.split_index = num_3d_start * num_vert
 
@@ -1055,23 +1047,31 @@ class Net(nn.Module):
         self.frac_idxs = frac_idxs
         self.num_3d_start = num_3d_start
 
-        # self.layer_2d_3d = nn.Sequential(
-        #     nn.Conv2d(num_in_2d, num_in_2d * num_vert * mult_fac_2d, kernel_size=(1, 3), groups=num_in_2d),
-        #     Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d * mult_fac_2d, z=num_vert, x=1, k=1),
-        # )
+        mult_fac_2d = 1
+        self.layer_2d_3d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange(
+                "b (c z) k -> b (c k) z", c=num_in_2d * mult_fac_2d, z=num_vert, k=1
+            ),
+        )
 
-        # self.layer_3d = nn.Sequential(
-        #     Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
-        #     nn.Conv2d(
-        #         num_3d_in,
-        #         dim - num_in_2d * mult_fac_2d,
-        #         kernel_size=(1, 3),
-        #     ),
-        # )
+        self.layer_3d = nn.Sequential(
+            Rearrange("b (c z) -> b c z", z=num_vert),
+            nn.Conv1d(
+                num_3d_in,
+                dim - num_in_2d * mult_fac_2d,
+                kernel_size=1,
+            ),
+        )
 
         heads = dim // 64
         # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
-        self.enc = XTrEncoder(dim, 3, num_in_2d, num_3d_in, num_vert)
+        # self.enc = XEncoder(dim, 5, num_in_2d, num_3d_in, num_vert)
 
         self.blocks = nn.Sequential(
             # block(dim),
@@ -1087,7 +1087,7 @@ class Net(nn.Module):
                 ff_swish=True,
                 ff_glu=True,
                 attn_talking_heads=True,
-                attn_qk_norm=False,  # set to True
+                # attn_qk_norm=False,  # set to True
                 attn_flash=False,
                 # logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
@@ -1095,6 +1095,11 @@ class Net(nn.Module):
                 # gate_residual=True,
                 # ff_no_bias = True,
                 # attn_gate_values = True,
+                # post_norm=False,
+                # pre_norm=False,
+                # no_pre_or_postnorm=True,
+                # attn_qk_norm=True,
+                # attn_qk_norm_dim_scale=True,
                 pre_norm=True,
                 sandwich_norm=True,
                 # attn_use_cope=True,
@@ -1143,11 +1148,12 @@ class Net(nn.Module):
         #     x_emb = self.embedding(emb_idxs)
         #     x_2d = torch.cat([x_2d, x_emb], dim=1)
 
-        x_point, x_1d = split_data(x, self.split_index, self.num_2d_in, self.num_static)
+        x_point, x_1d = split_data(x, self.split_index, self.num_2d_in)
 
-        x_out = self.enc(x_point, x_1d)
+        x_2d = self.layer_2d_3d(x_point[..., None])
+        x_3d = self.layer_3d(x_1d)
 
-        x_out = self.blocks(x_out)
+        x_out = self.blocks(torch.cat([x_2d, x_3d], dim=1))
 
         out_3d = self.out_3d(x_out)
 
@@ -1165,15 +1171,16 @@ class Net(nn.Module):
         return torch.cat([out_3d, out_2d], dim=1)
 
 
-def split_data(x, split_idx, num_2d_in, num_static):
-    x = rearrange(x, "b t c -> b c t").contiguous()
+def split_data(x, split_idx, num_2d_in):
+    # x = rearrange(x, "b t c -> b c t").contiguous()
 
     # Data contains 1d vars, point vars, then 1d, then static vars...
     x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
 
     x_1d_2, x_point = x_point[:, num_2d_in:], x_point[:, :num_2d_in]
-    x_1d_2, x_point_2 = x_1d_2[:, :-num_static], x_1d_2[:, -num_static:]
+    # x_1d_2, x_point_2 = x_1d_2[:, :-num_static], x_1d_2[:, -num_static:]
 
     x_1d = torch.cat([x_1d, x_1d_2], dim=1)
-    x_point = torch.cat([x_point, x_point_2], dim=1)
+    # x_point = torch.cat([x_point, x_point_2], dim=1)
+
     return x_point, x_1d

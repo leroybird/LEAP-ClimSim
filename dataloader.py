@@ -32,7 +32,7 @@ class LeapLoader:
         grid_neighbours_path=Path("__file__").parent / "neighbours.nc",
         x_transform=None,
         y_transform=None,
-        add_static=True,
+        add_static=False,
         muti_step=True,
     ):
         self.root_folder = root_folder
@@ -431,10 +431,10 @@ class LeapLoader:
         #     ds_target = ds_target * self.output_scale
         # else:
 
-        lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
-        lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
-        lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
-        area = self.grid_info["area_wgt"].values
+        # lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
+        # lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
+        # lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
+        # area = self.grid_info["area_wgt"].values
 
         ds_input = ds_input.drop(["lat", "lon"])
 
@@ -481,20 +481,26 @@ class LeapLoader:
             case "next_path":
                 time_emb = np.ones_like(dist_norm)
 
-        x_nei = np.concatenate([x_nei, y_dist, x_dist, dist_norm, time_emb], axis=-1).astype(np.float32)
+        x_nei = np.concatenate(
+            [x_nei, y_dist, x_dist, dist_norm, time_emb], axis=-1
+        ).astype(np.float32)
         return x_nei, y_all
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, dtype=np.float32):
+        x, y = self.get_data(idx)
+        return x.astype(dtype), y.astype(dtype)
 
-        if self.multi_step:
-            x0, _ = self.get_data_neighbours(idx, key="prev_path")
-            x1, y = self.get_data_neighbours(idx, key="path")
-            x2, _ = self.get_data_neighbours(idx, key="next_path")
+    # def __getitem__(self, idx):
 
-            # x1 first so x1[:,0] is the target
-            return np.concatenate([x1, x0, x2], axis=1), y
-        else:
-            return self.get_data(idx)
+    #     if self.multi_step:
+    #         x0, _ = self.get_data_neighbours(idx, key="prev_path")
+    #         x1, y = self.get_data_neighbours(idx, key="path")
+    #         x2, _ = self.get_data_neighbours(idx, key="next_path")
+
+    #         # x1 first so x1[:,0] is the target
+    #         return np.concatenate([x1, x0, x2], axis=1), y
+    #     else:
+    #         return self.get_data(idx)
 
 
 def get_idxs(num, num_workers, seed=42):
@@ -561,7 +567,7 @@ def concat_collate(batch):
     return x, y
 
 
-def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
+def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     x_norm, y_norm = norm.get_stats(loader_cfg, data_cfg)
 
     df_index = pd.read_parquet(loader_cfg.index_path)
@@ -575,29 +581,42 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
         root_folder=Path(loader_cfg.root_folder),
         grid_info_path=loader_cfg.grid_info_path,
         df=df_index_tr,
-        x_transform=x_norm,
-        y_transform=y_norm,
+        x_transform=x_norm if loader_cfg.apply_norm else None,
+        y_transform=y_norm if loader_cfg.apply_norm else None,
     )
-
-    train_ds = IterableDataset(inner_train_ds, num_workers=24)
-    train_dl = torch.utils.data.DataLoader(
-        train_ds,
-        num_workers=24,
-        batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
-        collate_fn=concat_collate,
-        pin_memory=True,
-    )
-
-    x, y = next(iter(train_dl))
-    print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
 
     valid_ds = LeapLoader(
         root_folder=Path(loader_cfg.root_folder),
         grid_info_path=loader_cfg.grid_info_path,
         df=df_index_val,
-        x_transform=x_norm,
-        y_transform=y_norm,
+        x_transform=x_norm if loader_cfg.apply_norm else None,
+        y_transform=y_norm if loader_cfg.apply_norm else None,
     )
+
+    return inner_train_ds, valid_ds
+
+
+def setup_dataloaders(
+    loader_cfg: config.LoaderConfig,
+    data_cfg: config.DataConfig,
+):
+    inner_train_ds, valid_ds = get_datasets(loader_cfg, data_cfg)
+
+    if loader_cfg.use_iterable_train:
+        train_ds = IterableDataset(inner_train_ds, num_workers=24)
+        dl_kwargs = dict(
+            num_workers=24,
+            batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+            collate_fn=concat_collate,
+        )
+    else:
+        train_ds = inner_train_ds
+        dl_kwargs = dict(num_workers=8, batch_size=1)  # effective batch size -> 384
+
+    train_dl = torch.utils.data.DataLoader(train_ds, pin_memory=True, **dl_kwargs)
+
+    x, y = next(iter(train_dl))
+    print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
 
     # effective batch size -> 384
     valid_loader = torch.utils.data.DataLoader(

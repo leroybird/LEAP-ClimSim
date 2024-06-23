@@ -1,4 +1,5 @@
 # %%
+from cgi import test
 import polars as pl
 import torch
 import norm
@@ -20,6 +21,9 @@ test_df
 test_data = test_df[:, 1:preds.shape[1]+1].to_numpy()
 test_data.shape
 #%%
+test_data_mod = test_data.shape[0] % 384
+test_data_mod
+#%%
 weightings = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
 weighting = weightings.iloc[0, 1:].values.astype(np.float32)
 weightings.shape
@@ -34,11 +38,12 @@ norm_y.zero_mask
 # %%
 preds.shape
 # %%
-assert preds.shape[0] == fill_df.shape[0] - offset*2
+
+assert preds.shape[0] == fill_df.shape[0] - offset*2 - test_data_mod
 # %%
 # %%
 # Set all predictions from offset to the end, apart from the first column
-fill_df.iloc[offset:-offset, 1:] = preds
+fill_df.iloc[offset:-offset-test_data_mod, 1:] = preds
 # %%
 diff_mask = norm_y.zero_mask.copy()
 diff_mask.shape

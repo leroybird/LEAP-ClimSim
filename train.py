@@ -16,6 +16,8 @@ from lightning.pytorch.callbacks import StochasticWeightAveraging
 from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
 from lightning.pytorch.tuner import Tuner
 
+torch._dynamo.config.cache_size_limit = 512
+
 
 def r_squared(pred, tar, mask=None, s_total=0.886):
     # s_total pre-calculated
@@ -193,14 +195,16 @@ class LitModel(L.LightningModule):
                 self.model.parameters(),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
-                warmup_steps=1000,
+                warmup_steps=3000,
                 betas=(0.95, 0.999),
             )
             self.opt = opt
             return opt
         else:
             opt = torch.optim.AdamW(
-                self.model.parameters(), lr=self.learning_rate, weight_decay=1e-5
+                self.model.parameters(),
+                lr=self.learning_rate,
+                weight_decay=1e-5,
             )
 
             # opt = torch.optim.AdamW(

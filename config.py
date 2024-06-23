@@ -15,7 +15,10 @@ class LoaderConfig(BaseModel):
     num_workers: int = 24
     seed: int = 42
     sample_size: int = 16
-
+    use_iterable_train : bool = True
+    
+    apply_norm : bool = True
+    
     batch_size: int = 128
 
 
