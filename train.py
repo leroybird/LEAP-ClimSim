@@ -1,7 +1,9 @@
+from lightning.pytorch.strategies import DDPStrategy
 import argparse
 from matplotlib import pyplot as plt
 import torch
 import lightning as L
+import torch.distributed
 import wandb
 import fastai.vision.all as fv
 import torch.nn as nn
@@ -284,12 +286,13 @@ if __name__ == "__main__":
             filename="model-{step:06d}-{val_mse:.3f}",
             save_top_k=3,
             mode="min",
-            save_weights_only=False,
         )
         callbacks.append(checkpoint_callback)
 
         wandb.init(
-            project="leap", config={**cfg_loader.model_dump(), **cfg_data.model_dump()}
+            project="leap",
+            config={**cfg_loader.model_dump(), **cfg_data.model_dump()},
+            group="DDP",
         )
         logger = L.pytorch.loggers.WandbLogger()
     else:
@@ -301,8 +304,9 @@ if __name__ == "__main__":
         val_check_interval=20000,
         callbacks=callbacks,
         enable_model_summary=True,
-        # precision="bf16-mixed",
+        #precision="bf16-mixed",
         gradient_clip_val=1.0,
+        #strategy=DDPStrategy(gradient_as_bucket_view=True, static_graph=True),
     )
 
     if args.lr_find:

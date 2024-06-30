@@ -1,6 +1,4 @@
-from re import L
 from ptwt._stationary_transform import _swt
-from collections import namedtuple
 
 # from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
@@ -8,7 +6,6 @@ import math
 
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange
-import pandas as pd
 from torchvision.ops import Permute
 import torch.nn.functional as F
 from typing import Callable, Optional
@@ -22,13 +19,7 @@ from x_transformers.x_transformers import (
     FeedForward,
     RotaryEmbedding,
 )
-import x_transformers
 
-# from mwt import MWT1d
-# from fastkan import FastKAN
-from torch.nn.attention import SDPBackend
-
-# from labml_nn.normalization.deep_norm import DeepNorm
 
 # Enable TFfloat32
 torch.backends.cuda.matmul.allow_tf32 = True
@@ -1018,8 +1009,8 @@ class Net(nn.Module):
         num_static=0,
         num_3d_start=6,
         num_vert=60,
-        dim=512,
-        depth=20,
+        dim=768,
+        depth=30,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -1069,7 +1060,6 @@ class Net(nn.Module):
             ),
         )
 
-        heads = dim // 64
         # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
         # self.enc = XEncoder(dim, 5, num_in_2d, num_3d_in, num_vert)
 
@@ -1089,6 +1079,9 @@ class Net(nn.Module):
                 attn_talking_heads=True,
                 # attn_qk_norm=False,  # set to True
                 attn_flash=False,
+                attn_dropout=0.1,
+                # ff_relu_squared=True,
+                ff_dropout=0.0,
                 # logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
@@ -1144,10 +1137,6 @@ class Net(nn.Module):
         )
 
     def forward(self, x):
-        # if self.embedding is not None:
-        #     x_emb = self.embedding(emb_idxs)
-        #     x_2d = torch.cat([x_2d, x_emb], dim=1)
-
         x_point, x_1d = split_data(x, self.split_index, self.num_2d_in)
 
         x_2d = self.layer_2d_3d(x_point[..., None])
