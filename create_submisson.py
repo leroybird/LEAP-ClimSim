@@ -44,12 +44,14 @@ preds
 diff_mask = norm_y.zero_mask.copy()
 diff_mask.shape
 #%%
+diff_mask
+#%%
 missing_mask = ((weighting == 1) & diff_mask)
 missing_mask
 #%%
 missing_mask_pd = np.concatenate([np.zeros(1, dtype=bool), missing_mask])
 # %%
-out_df = pd.DataFrame(test_df["sample_id"])
+out_df = pd.DataFrame({'sample_id' : test_df["sample_id"]})
 out_df[list(weightings.columns[1:])] = preds 
 #%%
 assert np.isclose(out_df[list(weightings.columns[1:])].to_numpy(), preds).all()
@@ -58,10 +60,13 @@ out_df
 #%%
 out_df.iloc[:, missing_mask_pd] = -(test_data[:, missing_mask])/1200
 # %%
-out_df
-# %%
-assert out_df.iloc[:, 1:].iloc[:, weighting == 0].sum().sum() == 0
+out_df.values[1, 1]
 
 # %%
-out_df.to_parquet("first_new.parquet", index=False)
+assert out_df.iloc[:, 1:].iloc[:, weighting == 0].sum().sum() == 0
+out_df.rename(columns={0 : "sample_id"}, inplace=True)
+#%%
+out_df.columns
 # %%
+out_df.to_parquet("first_new2.parquet", index=False)
+#%%
