@@ -156,7 +156,12 @@ def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     assert np.isfinite(std_weights).all()
 
     stats_x = load_from_json(loader_cfg.x_stats_path)
-    tanh_mults = 2.5 / (stats_x["x_range"] + 0.1)
+    if loader_cfg.x_tanh:
+        print("Using tanh")
+        tanh_mults = 2.5 / (stats_x["x_range"] + 0.1)
+    else:
+        print("Disabling tanh")
+        tanh_mults = None
 
     norm_x = Norm2(stds=stats_x["stds"], means=stats_x["means"], tanh_mults=tanh_mults)
     # norm_x = Norm(fname=loader_cfg.x_stats_path, eps=1e-7)

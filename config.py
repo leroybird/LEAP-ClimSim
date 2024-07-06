@@ -23,15 +23,15 @@ class LoaderConfig(BaseModel):
     apply_norm: bool = True
     batch_size: int = 128
 
-    x_tanh : bool = True
-    y_tanh : bool = False
+    x_tanh: bool = False
+
 
 class DataConfig(BaseModel):
     num_vert: int = 60
     num_vert_feat: int = 9
     num_vert_feat_y: int = 6
-    split_index : int = num_vert_feat_y * num_vert
-    
+    split_index: int = num_vert_feat_y * num_vert
+
     num_2d_feat: int = 16
     num_2d_feat_y: int = 8
 
