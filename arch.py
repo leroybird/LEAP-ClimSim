@@ -1007,10 +1007,9 @@ class Net(nn.Module):
         num_2d_out,
         num_3d_out,
         num_static=0,
-        num_3d_start=6,
         num_vert=60,
-        dim=768,
-        depth=30,
+        dim=256,
+        depth=20,
         block=ConvNextBlock2,
         num_emb=384,
         emb_ch=32,
@@ -1029,17 +1028,17 @@ class Net(nn.Module):
         # else:
         #     self.embedding = None
 
-        self.split_index = num_3d_start * num_vert
+        assert num_in_2d == 16
+        assert num_3d_in == 9
 
         self.num_3d_in = num_3d_in
         self.num_2d_out = num_2d_out
         self.num_3d_out = num_3d_out
         self.num_vert = num_vert
         self.frac_idxs = frac_idxs
-        self.num_3d_start = num_3d_start
 
         mult_fac_2d = 1
-        self.layer_2d_3d = nn.Sequential(
+        self.layer_proj_1d = nn.Sequential(
             nn.Conv1d(
                 num_in_2d,
                 num_in_2d * num_vert * mult_fac_2d,
@@ -1051,13 +1050,12 @@ class Net(nn.Module):
             ),
         )
 
-        self.layer_3d = nn.Sequential(
-            Rearrange("b (c z) -> b c z", z=num_vert),
-            nn.Conv1d(
-                num_3d_in,
-                dim - num_in_2d * mult_fac_2d,
-                kernel_size=1,
-            ),
+        self.layer_re_1d = Rearrange("b (c z) -> b c z", z=num_vert)
+
+        self.layer_1d_lin = nn.Conv1d(
+            num_3d_in * 2,
+            dim - num_in_2d * mult_fac_2d,
+            kernel_size=1,
         )
 
         # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
@@ -1137,12 +1135,15 @@ class Net(nn.Module):
         )
 
     def forward(self, x):
-        x_point, x_1d = split_data(x, self.split_index, self.num_2d_in)
+        x_point, x_1d, x_1d_re = x
+        
+        xp_1d = self.layer_proj_1d(x_point[..., None])
+        x_1d = self.layer_re_1d(x_1d)
+        
+        x_1d_re = rearrange(x_1d_re, "b z c -> b c z")
+        x_1d = self.layer_1d_lin(torch.cat((x_1d, x_1d_re), dim=1))
 
-        x_2d = self.layer_2d_3d(x_point[..., None])
-        x_3d = self.layer_3d(x_1d)
-
-        x_out = self.blocks(torch.cat([x_2d, x_3d], dim=1))
+        x_out = self.blocks(torch.cat([xp_1d, x_1d], dim=1))
 
         out_3d = self.out_3d(x_out)
 
@@ -1158,18 +1159,3 @@ class Net(nn.Module):
         out_2d = self.out_2d(x_out)
 
         return torch.cat([out_3d, out_2d], dim=1)
-
-
-def split_data(x, split_idx, num_2d_in):
-    # x = rearrange(x, "b t c -> b c t").contiguous()
-
-    # Data contains 1d vars, point vars, then 1d, then static vars...
-    x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
-
-    x_1d_2, x_point = x_point[:, num_2d_in:], x_point[:, :num_2d_in]
-    # x_1d_2, x_point_2 = x_1d_2[:, :-num_static], x_1d_2[:, -num_static:]
-
-    x_1d = torch.cat([x_1d, x_1d_2], dim=1)
-    # x_point = torch.cat([x_point, x_point_2], dim=1)
-
-    return x_point, x_1d

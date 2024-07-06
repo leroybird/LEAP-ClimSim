@@ -4,7 +4,9 @@
 #%%
 import logging
 from pathlib import Path
-from config import DataConfig, LoaderConfig
+
+from matplotlib import pyplot as plt
+from config import DataConfig, LoaderConfig, get_data_config
 import dataloader
 import pandas as pd
 import numpy as np
@@ -13,7 +15,7 @@ import polars as pl
 
 #%%
 cfg_loader = LoaderConfig()
-cfg_data = DataConfig()
+cfg_data = get_data_config(cfg_loader)
 cfg_data, cfg_loader
 #%%
 df_index = pd.read_parquet('/mnt/ssd/kaggle/index_fwd.parquet')
@@ -31,6 +33,25 @@ len(weights)
 df_index_tr = df_index[df_index['year'] <= 8]
 df_index_val = df_index[df_index['year'] == 9]
 assert len(df_index) == len(df_index_tr) + len(df_index_val)
+#%%
+train_dl, val_dl = dataloader.setup_dataloaders(loader_cfg=cfg_loader, data_cfg=cfg_data)
+#%%
+batch = next(iter(train_dl))
+#%%
+batch[1].shape
+#%%
+x = batch[0][0]
+#%%
+batch = next(iter(val_dl))
+
+#%%
+plt.figure(figsize=(20, 20))
+plt.plot(x.max(dim=0).values[0:450])
+plt.plot(x.min(dim=0).values[0:450])
+plt.ylim(1, -1)
+#%%
+
+
 #%%
 ds_train = dataloader.LeapLoader(root_folder, grid_info_path, df_index_tr,)
 ds_train

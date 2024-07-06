@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # %%
-input_fname = "output.pt"
+input_fname = "output_new_big.pt"
 offset = 384
 # %%
 preds = torch.load(input_fname)
@@ -16,8 +16,10 @@ preds.shape
 # %%
 preds.std(axis=0)
 # %%
-test_df = pl.read_csv("/mnt/storage/kaggle/new_data/test.csv")
+test_df = pl.read_csv("/mnt/ssd/kaggle/new_data/test.csv")
 test_df
+#%%
+#test_df.write_parquet("/mnt/ssd/kaggle/new_data/test.parquet")
 # %%
 test_data = test_df[:, 1 : preds.shape[1] + 1].to_numpy()
 test_data.shape
@@ -46,6 +48,8 @@ diff_mask.shape
 #%%
 diff_mask
 #%%
+weighting == 1
+#%%
 missing_mask = ((weighting == 1) & diff_mask)
 missing_mask
 #%%
@@ -58,15 +62,18 @@ assert np.isclose(out_df[list(weightings.columns[1:])].to_numpy(), preds).all()
 #%%
 out_df
 #%%
+test_df
+#%%
 out_df.iloc[:, missing_mask_pd] = -(test_data[:, missing_mask])/1200
 # %%
-out_df.values[1, 1]
-
+out_df
 # %%
 assert out_df.iloc[:, 1:].iloc[:, weighting == 0].sum().sum() == 0
 out_df.rename(columns={0 : "sample_id"}, inplace=True)
 #%%
 out_df.columns
 # %%
-out_df.to_parquet("first_new2.parquet", index=False)
+out_df.to_parquet("first_new3.parquet", index=False)
+#%%
+t = pl.read_parquet("first_new2.parquet")
 #%%

@@ -1,3 +1,5 @@
+*.png
+*.parquet
 wandb
 checkpoints/
 test_checkpoints/

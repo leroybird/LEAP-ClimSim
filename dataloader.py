@@ -8,7 +8,7 @@ import pandas as pd
 import config
 import logging
 import polars as pl
-
+from torch.utils.data import DataLoader
 import norm
 
 
@@ -488,7 +488,7 @@ class LeapLoader:
 
     def __getitem__(self, idx, dtype=np.float32):
         x, y = self.get_data(idx)
-        return x.astype(dtype), y.astype(dtype)
+        return x, y.astype(dtype)
 
     # def __getitem__(self, idx):
 
@@ -511,60 +511,108 @@ def get_idxs(num, num_workers, seed=42):
     return idxs
 
 
-class IterableDataset(torch.utils.data.IterableDataset):
-    def __init__(self, inner_ds, num_workers=24, seed=42, sample_size=16):
-        self.num_workers = num_workers
-        self.total_iterations = -1
-        self.seed = seed
+# class IterableDataset(torch.utils.data.IterableDataset):
+#     def __init__(self, inner_ds, num_workers=24, seed=42, sample_size=16):
+#         self.num_workers = num_workers
+#         self.total_iterations = -1
+#         self.seed = seed
+#         self.inner_ds = inner_ds
+#         self.num_samples = len(inner_ds)
+#         self.sample_size = sample_size
+#         self.grid_points = 384
+#         assert self.grid_points % self.sample_size == 0
+#         self.inner_rep = self.grid_points // self.sample_size
+
+#     def gen(
+#         self,
+#     ):
+#         self.total_iterations += 1
+#         worker_info = torch.utils.data.get_worker_info()
+
+#         if worker_info is None:
+#             logging.warning("No worker info")
+#             iter_idx = 0
+#         else:
+#             iter_idx = worker_info.id
+
+#         idxs = get_idxs(
+#             len(self.inner_ds), self.num_workers, self.seed + self.total_iterations
+#         )
+
+#         for idx in idxs[iter_idx]:
+#             # Each inner dataset contains 384 unique grid points
+#             ds_x_inner, ds_y_inner = self.inner_ds[idx]
+#             # ds_x_inner = ds_x_inner.values
+#             # ds_y_inner = ds_y_inner.values
+
+#             random_sample = np.random.permutation(self.grid_points)
+#             for n in range(self.inner_rep):
+#                 ds_x = ds_x_inner[
+#                     random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+#                 ]
+#                 ds_y = ds_y_inner[
+#                     random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+#                 ]
+#                 yield ds_x, ds_y
+
+#     def __iter__(self):
+#         return self.gen()
+
+
+class InnerDataLoader(torch.utils.data.IterableDataset):
+    def __init__(self, inner_ds, num_workers=12, seed=42, batch_size=128):
         self.inner_ds = inner_ds
-        self.num_samples = len(inner_ds)
-        self.sample_size = sample_size
-        self.grid_points = 384
-        assert self.grid_points % self.sample_size == 0
-        self.inner_rep = self.grid_points // self.sample_size
-
-    def gen(
-        self,
-    ):
-        self.total_iterations += 1
-        worker_info = torch.utils.data.get_worker_info()
-
-        if worker_info is None:
-            logging.warning("No worker info")
-            iter_idx = 0
-        else:
-            iter_idx = worker_info.id
-
-        idxs = get_idxs(
-            len(self.inner_ds), self.num_workers, self.seed + self.total_iterations
+        self.num_workers = num_workers
+        self.seed = seed
+        self.gen = np.random.RandomState(seed)
+        self.dl = DataLoader(
+            inner_ds,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            batch_size=num_workers,
+            prefetch_factor=2,
+            collate_fn=concat_collate,
         )
+        assert (384 * num_workers) % batch_size == 0
 
-        for idx in idxs[iter_idx]:
-            # Each inner dataset contains 384 unique grid points
-            ds_x_inner, ds_y_inner = self.inner_ds[idx]
-            # ds_x_inner = ds_x_inner.values
-            # ds_y_inner = ds_y_inner.values
-
-            random_sample = np.random.permutation(self.grid_points)
-            for n in range(self.inner_rep):
-                ds_x = ds_x_inner[
-                    random_sample[n * self.sample_size : (n + 1) * self.sample_size]
-                ]
-                ds_y = ds_y_inner[
-                    random_sample[n * self.sample_size : (n + 1) * self.sample_size]
-                ]
-                yield ds_x, ds_y
+        self.batch_size = batch_size
+        self.dl_iter = iter(self.dl)
 
     def __iter__(self):
-        return self.gen()
+        try:
+            while True:
+                x, y = next(self.dl_iter)
+                sample = self.gen.permutation(y.shape[0])
+                sample = sample.reshape(-1, self.batch_size,)
+
+                for i in range(sample.shape[0]):
+                    yield [a[sample[i]] for a in x], y[sample[i]]
+
+        except StopIteration:
+            self.dl_iter = iter(self.dl)
+            raise StopIteration
+
+    def __len__(self):
+        return len(self.inner_ds) * self.num_workers
+
+    # reset
+    def reset(self):
+        self.dl_iter = iter(self.dl)
 
 
 def concat_collate(batch):
-    x = [torch.from_numpy(b[0]) for b in batch]
-    y = [torch.from_numpy(b[1]) for b in batch]
-    x = torch.cat(x, dim=0)
-    y = torch.cat(y, dim=0)
-    return x, y
+    x_all = [[], [], []]
+    y_all = []
+    for (x1, x2, x3), y in batch:
+        x_all[0].append(torch.from_numpy(x1))
+        x_all[1].append(torch.from_numpy(x2))
+        x_all[2].append(torch.from_numpy(x3))
+        y_all.append(torch.from_numpy(y))
+
+    x_all = [torch.cat(x, dim=0) for x in x_all]
+    y_all = torch.cat(y_all, dim=0)
+    return x_all, y_all
 
 
 def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
@@ -596,6 +644,10 @@ def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     return inner_train_ds, valid_ds
 
 
+def single_batch_collate(batch):
+    return batch[0]
+
+
 def setup_dataloaders(
     loader_cfg: config.LoaderConfig,
     data_cfg: config.DataConfig,
@@ -603,20 +655,33 @@ def setup_dataloaders(
     inner_train_ds, valid_ds = get_datasets(loader_cfg, data_cfg)
 
     if loader_cfg.use_iterable_train:
-        train_ds = IterableDataset(inner_train_ds, num_workers=24)
+        train_ds = InnerDataLoader(
+            inner_train_ds, num_workers=12, batch_size=loader_cfg.batch_size
+        )
+
         dl_kwargs = dict(
-            num_workers=24,
-            batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
-            collate_fn=concat_collate,
+            num_workers=0,
+            batch_size=1,
+            collate_fn=single_batch_collate,
+            pin_memory=False,
         )
     else:
         train_ds = inner_train_ds
-        dl_kwargs = dict(num_workers=8, batch_size=1)  # effective batch size -> 384
+        dl_kwargs = dict(
+            num_workers=8, batch_size=1, pin_memory=True
+        )  # effective batch size -> 384
 
-    train_dl = torch.utils.data.DataLoader(train_ds, pin_memory=True, **dl_kwargs)
+    train_dl = torch.utils.data.DataLoader(train_ds, **dl_kwargs)
 
     x, y = next(iter(train_dl))
-    print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
+    print(f"y.shape: {y.shape} y_std: {y.std()}")
+    for n in range(len(x)):
+        print(
+            f"x[{n}].shape: {x[n].shape} x_std: {x[n].std()} x_max: {x[n].max()} x_min: {x[n].min()}"
+        )
+
+    if isinstance(train_ds, InnerDataLoader):
+        train_ds.reset()
 
     # effective batch size -> 384
     valid_loader = torch.utils.data.DataLoader(

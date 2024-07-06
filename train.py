@@ -177,8 +177,11 @@ class LitModel(L.LightningModule):
         sub_batch_size = cfg_loader.batch_size
 
         count = 0
-        for i in range(0, len(batch[0]), sub_batch_size):
-            x = batch[0][i : i + sub_batch_size]
+        for i in range(0, len(batch[1]), sub_batch_size):
+            x = []
+            for i_x in range(len(batch[0])):
+                x.append(batch[0][i_x][i : i + sub_batch_size])
+
             y = batch[1][i : i + sub_batch_size]
             loss += self.step((x, y), self.val_metrics, "val", batch_idx)
             count += 1
@@ -304,9 +307,9 @@ if __name__ == "__main__":
         val_check_interval=20000,
         callbacks=callbacks,
         enable_model_summary=True,
-        #precision="bf16-mixed",
+        # precision="bf16-mixed",
         gradient_clip_val=1.0,
-        #strategy=DDPStrategy(gradient_as_bucket_view=True, static_graph=True),
+        # strategy=DDPStrategy(gradient_as_bucket_view=True, static_graph=True),
     )
 
     if args.lr_find:

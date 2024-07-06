@@ -13,7 +13,7 @@ class LoaderConfig(BaseModel):
     train_kaggle_path: str = f"{base_path}/train2.parquet"
     train_kaggle_csv: str = f"{base_path}/train.csv"
     test_kaggle_path: str = f"{base_path}/new_data/test.csv"
-    x_stats_path: str = "stats_v2_1.json"
+    x_stats_path: str = "x_stats_v2_1.json"
 
     num_workers: int = 24
     seed: int = 42
@@ -23,17 +23,20 @@ class LoaderConfig(BaseModel):
     apply_norm: bool = True
     batch_size: int = 128
 
+    x_tanh : bool = True
+    y_tanh : bool = False
 
 class DataConfig(BaseModel):
     num_vert: int = 60
     num_vert_feat: int = 9
     num_vert_feat_y: int = 6
-
+    split_index : int = num_vert_feat_y * num_vert
+    
     num_2d_feat: int = 16
     num_2d_feat_y: int = 8
 
-    y_names: list[str] = None
-    x_names: list[str] = None
+    y_names: list[str] | None = None
+    x_names: list[str] | None = None
 
     fac_idxs: tuple[int, int] = (num_vert, num_vert * 4)
 
