@@ -22,9 +22,10 @@ class EvalLoader(Dataset):
     def __getitem__(self, idx):
         x = self.data_dict["x"][idx].copy()
         y = self.data_dict["y"][idx].copy() if "y" in self.data_dict else np.zeros(1)
-        x = self.norm_dict["x"](x[None, :])[0]
+        x = self.norm_dict["x"](x[None, :])
+        x = [a[0] for a in x]
         y = self.norm_dict["y"](y[None, :])[0] if "y" in self.data_dict else np.zeros(1)
-        return x.astype(np.float32)
+        return x
 
     def __len__(self):
         return self.data_dict["x"].shape[0]

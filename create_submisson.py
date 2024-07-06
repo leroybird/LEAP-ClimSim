@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # %%
-input_fname = "output_new_big.pt"
+input_fname = "out_n.pt"
 offset = 384
 # %%
 preds = torch.load(input_fname)
@@ -36,6 +36,7 @@ cfg_loader = config.LoaderConfig()
 cfg_data = config.get_data_config(cfg_loader)
 
 norm_x, norm_y = norm.get_stats(cfg_loader, cfg_data)
+del norm_x
 # %%
 norm_y.zero_mask
 # %%
@@ -45,6 +46,8 @@ preds
 # %%
 diff_mask = norm_y.zero_mask.copy()
 diff_mask.shape
+#%%
+diff_mask
 #%%
 diff_mask
 #%%
@@ -62,7 +65,7 @@ assert np.isclose(out_df[list(weightings.columns[1:])].to_numpy(), preds).all()
 #%%
 out_df
 #%%
-test_df
+missing_mask_pd
 #%%
 out_df.iloc[:, missing_mask_pd] = -(test_data[:, missing_mask])/1200
 # %%
@@ -73,7 +76,6 @@ out_df.rename(columns={0 : "sample_id"}, inplace=True)
 #%%
 out_df.columns
 # %%
-out_df.to_parquet("first_new3.parquet", index=False)
+out_df.to_parquet("norm_small.parquet", index=False)
 #%%
-t = pl.read_parquet("first_new2.parquet")
 #%%

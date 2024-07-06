@@ -21,9 +21,9 @@ class LoaderConfig(BaseModel):
     use_iterable_train: bool = True
 
     apply_norm: bool = True
-    batch_size: int = 128
+    batch_size: int = 256
 
-    x_tanh: bool = False
+    x_tanh: bool = True
 
 
 class DataConfig(BaseModel):

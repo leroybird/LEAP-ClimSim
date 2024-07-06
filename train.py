@@ -18,6 +18,8 @@ from lightning.pytorch.callbacks import StochasticWeightAveraging
 from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
 from lightning.pytorch.tuner import Tuner
 
+
+import robust_loss_pytorch.general
 torch._dynamo.config.cache_size_limit = 512
 
 
@@ -81,7 +83,7 @@ def mse_point(pred, tar):
 
 class LitModel(L.LightningModule):
     def __init__(
-        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False
+        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False, use_robust=False
     ):
         super().__init__()
 
@@ -96,8 +98,17 @@ class LitModel(L.LightningModule):
             self.train_loader, self.valid_loader = dataloader.setup_dataloaders(
                 cfg_loader, cfg_data
             )
+        
+        self.use_robust = use_robust
+        if use_robust:
+            print('Using robust loss')
+            self.loss_func = robust_loss_pytorch.adaptive.AdaptiveLossFunction( 
+                num_dims=368, float_dtype=torch.float32, device = torch.device('cuda:0')
+            )
+        else:
+            self.loss_func = nn.HuberLoss(delta=2.0)
 
-        self.loss_func = nn.HuberLoss(delta=2.0)
+
         self.val_metrics = [
             fv.mae,
             fv.mse,
@@ -136,7 +147,11 @@ class LitModel(L.LightningModule):
         x, y = batch
 
         pred = self.model(x)
-        loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
+        if self.use_robust:
+            loss = self.loss_func(pred[:, self.mask] - y[:, self.mask])
+            loss = torch.mean(loss)
+        else:
+            loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
         if step_name != "train" or batch_idx % 20 == 0:
             self.log(
@@ -197,7 +212,7 @@ class LitModel(L.LightningModule):
     def configure_optimizers(self):
         if self.use_schedulefree:
             opt = AdamWScheduleFree(
-                self.model.parameters(),
+                list(self.model.parameters()) + list(self.loss_func.parameters()) if self.use_robust else self.model.parameters(),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
                 warmup_steps=3000,

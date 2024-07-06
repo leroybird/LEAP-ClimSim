@@ -573,28 +573,31 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
             batch_size=num_workers,
             prefetch_factor=2,
             collate_fn=concat_collate,
+            shuffle=True,
         )
         assert (384 * num_workers) % batch_size == 0
 
         self.batch_size = batch_size
-        self.dl_iter = iter(self.dl)
+        self.dl_iter = None
 
     def __iter__(self):
-        try:
-            while True:
-                x, y = next(self.dl_iter)
-                sample = self.gen.permutation(y.shape[0])
-                sample = sample.reshape(-1, self.batch_size,)
+        print("Starting generator")
+        self.dl_iter = iter(self.dl)
 
-                for i in range(sample.shape[0]):
-                    yield [a[sample[i]] for a in x], y[sample[i]]
+        return self.generator() 
 
-        except StopIteration:
-            self.dl_iter = iter(self.dl)
-            raise StopIteration
+    def generator(self):
+        while True:
+            assert self.dl_iter is not None
+            x, y = next(self.dl_iter)
+            sample = self.gen.permutation(y.shape[0])
+            sample = sample.reshape(-1, self.batch_size,)
+
+            for i in range(sample.shape[0]):
+                yield [a[sample[i]] for a in x], y[sample[i]]
 
     def __len__(self):
-        return len(self.inner_ds) * self.num_workers
+        return len(self.inner_ds) -  (len(self.inner_ds) % self.batch_size)
 
     # reset
     def reset(self):
@@ -668,7 +671,7 @@ def setup_dataloaders(
     else:
         train_ds = inner_train_ds
         dl_kwargs = dict(
-            num_workers=8, batch_size=1, pin_memory=True
+            num_workers=8, batch_size=1, pin_memory=True, shuffle=True
         )  # effective batch size -> 384
 
     train_dl = torch.utils.data.DataLoader(train_ds, **dl_kwargs)
