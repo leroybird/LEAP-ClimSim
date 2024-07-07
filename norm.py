@@ -162,8 +162,28 @@ def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     else:
         print("Disabling tanh")
         tanh_mults = None
+    
 
-    norm_x = Norm2(stds=stats_x["stds"], means=stats_x["means"], tanh_mults=tanh_mults)
+    if loader_cfg.x_mask_thresh:
+        x_mask = stats_x['x_range'] > loader_cfg.x_mask_thresh
+        assert data_cfg.x_names is not None
+        for n, name in enumerate(data_cfg.x_names):
+            if name.startswith("state_q0001") and int(name.split("_")[-1]) <= 10:
+                x_mask[n] = True
+            if name.startswith("state_q0002") and int(name.split("_")[-1]) <= 15:
+                x_mask[n] = True
+            if name.startswith("state_q0003") and int(name.split("_")[-1]) <= 15:
+                x_mask[n] = True
+
+        print(f"Masking {x_mask.sum()} features")
+        print(f"Masked features: {np.array(data_cfg.x_names)[x_mask]}")
+
+
+    else:
+        x_mask = None
+
+    norm_x = Norm2(stds=stats_x["stds"], means=stats_x["means"], tanh_mults=tanh_mults,
+                   zero_mask=x_mask)
     # norm_x = Norm(fname=loader_cfg.x_stats_path, eps=1e-7)
     # Set means to zero for q vars so we can predict a multiplier
     # norm_x.means[:, data_cfg.fac_idxs[0] : data_cfg.fac_idxs[1]] = 0.0

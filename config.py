@@ -9,7 +9,7 @@ class LoaderConfig(BaseModel):
     root_folder: str = f"{base_path}/train"
 
     weights_path: str = f"{base_path}/sample_submission.csv"
-    sample_submission_path: str = f"{base_path}/new_data/ample_submission.csv"
+    sample_submission_path: str = f"{base_path}/new_data/sample_submission.csv"
     train_kaggle_path: str = f"{base_path}/train2.parquet"
     train_kaggle_csv: str = f"{base_path}/train.csv"
     test_kaggle_path: str = f"{base_path}/new_data/test.csv"
@@ -23,8 +23,8 @@ class LoaderConfig(BaseModel):
     apply_norm: bool = True
     batch_size: int = 256
 
-    x_tanh: bool = True
-
+    x_tanh: bool = False
+    x_mask_thresh: float = 200.0
 
 class DataConfig(BaseModel):
     num_vert: int = 60

@@ -83,7 +83,7 @@ def mse_point(pred, tar):
 
 class LitModel(L.LightningModule):
     def __init__(
-        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False, use_robust=False
+        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False, use_robust=True
     ):
         super().__init__()
 
@@ -111,8 +111,6 @@ class LitModel(L.LightningModule):
 
         self.val_metrics = [
             fv.mae,
-            fv.mse,
-            r_squared,
             mse_t,
             mse_q1,
             mse_q2,
@@ -136,7 +134,8 @@ class LitModel(L.LightningModule):
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
-
+        
+        self.residuals = []
         # self.mask[0:60] = True
         # self.mask[240:] = True
 
@@ -153,6 +152,10 @@ class LitModel(L.LightningModule):
         else:
             loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
+        if step_name == 'val':
+            self.residuals.append((pred[:, self.mask] - y[:, self.mask]).detach().cpu())
+
+
         if step_name != "train" or batch_idx % 20 == 0:
             self.log(
                 f"{step_name}_loss",
@@ -166,10 +169,11 @@ class LitModel(L.LightningModule):
                 self.log(
                     f"{step_name}_{metric.__name__}",
                     metric(pred, y).item(),
-                    prog_bar=True,
+                    prog_bar=False,
                 )
 
         return loss
+    
 
     def on_train_epoch_start(self):
         if self.use_schedulefree:
@@ -182,6 +186,16 @@ class LitModel(L.LightningModule):
     def on_validation_epoch_end(self):
         if self.use_schedulefree:
             self.opt.train()
+        
+        print('Calculating R2 score...')
+        residuals = torch.cat(self.residuals, dim=0)
+        r2 = 1 - torch.mean(residuals ** 2) / 0.886
+        self.log('val_r2', r2.item(), prog_bar=True, on_epoch=True)
+        mse = torch.mean(residuals ** 2) 
+        self.log('val_mse', mse.item(), prog_bar=True, on_epoch=True)
+
+        self.residuals = []
+
 
     def training_step(self, batch, batch_idx):
         return self.step(batch, self.train_metrics, "train", batch_idx)
@@ -297,22 +311,26 @@ if __name__ == "__main__":
     ]
 
     if not (args.debug or args.lr_find):
-        # Add save model callback
-        checkpoint_callback = ModelCheckpoint(
-            monitor="val_mse",
-            dirpath="checkpoints/",
-            filename="model-{step:06d}-{val_mse:.3f}",
-            save_top_k=3,
-            mode="min",
-        )
-        callbacks.append(checkpoint_callback)
-
+        
         wandb.init(
             project="leap",
             config={**cfg_loader.model_dump(), **cfg_data.model_dump()},
             group="DDP",
         )
         logger = L.pytorch.loggers.WandbLogger()
+        run_name = wandb.run.name if wandb.run is not None else "debug"
+        
+
+        # Add save model callback
+        checkpoint_callback = ModelCheckpoint(
+            monitor="val_mse",
+            dirpath="checkpoints/",
+            filename=f"{run_name}" + "-{step:06d}-{val_mse:.3f}",
+            save_top_k=3,
+            mode="min",
+        )
+        callbacks.append(checkpoint_callback)
+
     else:
         logger = None
 

@@ -8,7 +8,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # %%
-input_fname = "out_n.pt"
+input_fname = "out_n4.pt"
 offset = 384
 # %%
 preds = torch.load(input_fname)
@@ -76,6 +76,6 @@ out_df.rename(columns={0 : "sample_id"}, inplace=True)
 #%%
 out_df.columns
 # %%
-out_df.to_parquet("norm_small.parquet", index=False)
+out_df.to_parquet("norm_test_200.parquet", index=False)
 #%%
 #%%

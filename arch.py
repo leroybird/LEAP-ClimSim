@@ -1010,16 +1010,15 @@ class Net(nn.Module):
         num_vert=60,
         dim=256,
         depth=20,
-        block=ConvNextBlock2,
-        num_emb=384,
-        emb_ch=32,
-        use_emb: bool = False,
         frac_idxs=None,
-        model_type="transformer",
+        inc_1d_norm = True,
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
         self.num_static = num_static
+        self.inc_1d_norm = inc_1d_norm
+
+        
         num_in_2d = num_in_2d
 
         # if use_emb:
@@ -1049,11 +1048,15 @@ class Net(nn.Module):
                 "b (c z) k -> b (c k) z", c=num_in_2d * mult_fac_2d, z=num_vert, k=1
             ),
         )
-
+        
+        if self.inc_1d_norm:
+            num_3d_in *=  2
+        else:
+            print("No 1D norm")
         self.layer_re_1d = Rearrange("b (c z) -> b c z", z=num_vert)
 
         self.layer_1d_lin = nn.Conv1d(
-            num_3d_in * 2,
+            num_3d_in,
             dim - num_in_2d * mult_fac_2d,
             kernel_size=1,
         )
@@ -1141,7 +1144,10 @@ class Net(nn.Module):
         x_1d = self.layer_re_1d(x_1d)
         
         x_1d_re = rearrange(x_1d_re, "b z c -> b c z")
-        x_1d = self.layer_1d_lin(torch.cat((x_1d, x_1d_re), dim=1))
+        if self.inc_1d_norm:
+            x_1d = torch.cat((x_1d, x_1d_re), dim=1)
+
+        x_1d = self.layer_1d_lin(x_1d)
 
         x_out = self.blocks(torch.cat([xp_1d, x_1d], dim=1))
 
