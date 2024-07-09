@@ -1005,8 +1005,8 @@ class Net(nn.Module):
         num_3d_out,
         num_static=0,
         num_vert=60,
-        dim=256,
-        depth=20,
+        dim=1024,
+        depth=40,
         frac_idxs=None,
         inc_1d_norm = True,
         sigma_reparam = False
@@ -1080,7 +1080,7 @@ class Net(nn.Module):
                 attn_flash=False,
                 attn_dropout=0.0,
                 # ff_relu_squared=True,
-                ff_dropout=0.0,
+                ff_dropout=.2,
                 #attn_logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
