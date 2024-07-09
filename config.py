@@ -14,6 +14,7 @@ class LoaderConfig(BaseModel):
     train_kaggle_csv: str = f"{base_path}/train.csv"
     test_kaggle_path: str = f"{base_path}/new_data/test.csv"
     x_stats_path: str = "x_stats_v2_1.json"
+    y_stats_path: str = "y_stats_v2_1.json"
 
     num_workers: int = 24
     seed: int = 42
@@ -23,8 +24,8 @@ class LoaderConfig(BaseModel):
     apply_norm: bool = True
     batch_size: int = 256
 
-    x_tanh: bool = False
-    x_mask_thresh: float = 200.0
+    x_tanh: bool = True
+    x_mask_thresh: float | None = None
 
 class DataConfig(BaseModel):
     num_vert: int = 60

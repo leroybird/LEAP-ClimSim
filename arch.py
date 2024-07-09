@@ -1,4 +1,3 @@
-from ptwt._stationary_transform import _swt
 
 # from rotary_embedding_torch import RotaryEmbedding
 from functools import partial

@@ -147,13 +147,13 @@ class NormSplitCmb:
 
 def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     # Y stds are the weights
-    weights = pd.read_csv(loader_cfg.weights_path, nrows=1)
-    weights = weights.iloc[0, 1:].values.astype(np.float32)
+    #weights = pd.read_csv(loader_cfg.weights_path, nrows=1)
+    #weights = weights.iloc[0, 1:].values.astype(np.float32)
 
     # Use the weightings as y_std
-    std_weights = 1.0 / (weights)
-    std_weights[weights == 0] = 0
-    assert np.isfinite(std_weights).all()
+    #std_weights = 1.0 / (weights)
+    #std_weights[weights == 0] = 0
+    #assert np.isfinite(std_weights).all()
 
     stats_x = load_from_json(loader_cfg.x_stats_path)
     if loader_cfg.x_tanh:
@@ -188,15 +188,22 @@ def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     # Set means to zero for q vars so we can predict a multiplier
     # norm_x.means[:, data_cfg.fac_idxs[0] : data_cfg.fac_idxs[1]] = 0.0
 
-    norm_1dx = Norm2(stds=stats_x["x1d_std"], means=stats_x["x1d_mean"], ndim=2)
-
+    norm_1dx = Norm2(stds=stats_x["x1d_std"], means=stats_x["x1d_mean"], ndim=2)    
     norm_x_cmb = NormSplitCmb(norm_x, norm_1dx, data_cfg)
-    norm_y = Norm(
-        stds=std_weights, means=np.zeros_like(std_weights), zero_mask=std_weights < 1e-13
-    )
+
+    stats_y = load_from_json(loader_cfg.y_stats_path)
+
+    std_weights = stats_y["stds"]
+    y_means = stats_y["means"]
+    y_zero_mask = stats_y['y_zero']
+    
+    norm_y = Norm2(stds=std_weights, means=y_means, zero_mask=y_zero_mask)
+    
+    print(f"Zero mask: {y_zero_mask.sum()} of {len(y_zero_mask)}")
+
 
     # This variable still seems to have norm issues.
-    indxs = [data_cfg.y_names.index(a) for a in ["ptend_q0002_26", "ptend_q0002_25"]]
-    norm_y.zero_mask[indxs] = True
+    #indxs = [data_cfg.y_names.index(a) for a in ["ptend_q0002_26", "ptend_q0002_25"]]
+    #norm_y.zero_mask[indxs] = True
 
     return norm_x_cmb, norm_y
