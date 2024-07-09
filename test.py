@@ -66,31 +66,7 @@ x = train_df.select(FEAT_COLS).to_numpy()
 # #%%
 # len(FEAT_COLS + TARGET_COLS)
 #%%
-a = y/(x + 1e-15)
-min_fact = np.abs(a.min())
-min_fact
-#%%
-1/min_fact
-
-#%%
-a[a > min_fact*2] = 2*min_fact
-#%%
-subset.shape
-#%%
-a[a > min_fact*2] = min_fact
-#%%
-x[1]
-#%%
-a[1]*1200
-#%%
-#a[a == 0] = np.nan
-
-for n, col in enumerate(TARGET_COLS):
-    if n % 60 > 10:
-        plt.figure(figsize=(12, 12))
-        plt.hist(a[:, n]*1200, bins=100)
-        plt.savefig(f'plots/{col}.png')
-        plt.close()
+zero_mask
 #%%
 import torch
 #%%

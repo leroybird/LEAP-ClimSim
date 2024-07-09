@@ -1,3 +1,4 @@
+from functools import partial
 from lightning.pytorch.strategies import DDPStrategy
 import argparse
 from matplotlib import pyplot as plt
@@ -17,10 +18,16 @@ from schedulefree import AdamWScheduleFree
 from lightning.pytorch.callbacks import StochasticWeightAveraging
 from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
 from lightning.pytorch.tuner import Tuner
-
+from kornia import losses
 
 import robust_loss_pytorch.general
+
 torch._dynamo.config.cache_size_limit = 512
+
+# Enable tf32
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
 
 
 def r_squared(pred, tar, mask=None, s_total=0.886):
@@ -83,7 +90,13 @@ def mse_point(pred, tar):
 
 class LitModel(L.LightningModule):
     def __init__(
-        self, model, cfg_data, cfg_loader, setup_dataloader=True, pt_compile=False, use_robust=True
+        self,
+        model,
+        cfg_data,
+        cfg_loader,
+        setup_dataloader=True,
+        pt_compile=False,
+        use_robust=False,
     ):
         super().__init__()
 
@@ -98,16 +111,16 @@ class LitModel(L.LightningModule):
             self.train_loader, self.valid_loader = dataloader.setup_dataloaders(
                 cfg_loader, cfg_data
             )
-        
+
         self.use_robust = use_robust
         if use_robust:
-            print('Using robust loss')
-            self.loss_func = robust_loss_pytorch.adaptive.AdaptiveLossFunction( 
-                num_dims=368, float_dtype=torch.float32, device = torch.device('cuda:0')
+            print("Using robust loss")
+            self.loss_func = robust_loss_pytorch.adaptive.StudentsTLossFunction(
+                num_dims=368, float_dtype=torch.float32, device=torch.device("cuda:0")
             )
         else:
             self.loss_func = nn.HuberLoss(delta=2.0)
-
+            # self.loss_func = partial(losses.cauchy_loss, reduction='mean')
 
         self.val_metrics = [
             fv.mae,
@@ -129,12 +142,12 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 1e-3
+        self.learning_rate = 2e-3
         self.scheduler_steps = 200_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
-        
+
         self.residuals = []
         # self.mask[0:60] = True
         # self.mask[240:] = True
@@ -152,9 +165,8 @@ class LitModel(L.LightningModule):
         else:
             loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
-        if step_name == 'val':
+        if step_name == "val":
             self.residuals.append((pred[:, self.mask] - y[:, self.mask]).detach().cpu())
-
 
         if step_name != "train" or batch_idx % 20 == 0:
             self.log(
@@ -173,7 +185,6 @@ class LitModel(L.LightningModule):
                 )
 
         return loss
-    
 
     def on_train_epoch_start(self):
         if self.use_schedulefree:
@@ -186,16 +197,15 @@ class LitModel(L.LightningModule):
     def on_validation_epoch_end(self):
         if self.use_schedulefree:
             self.opt.train()
-        
-        print('Calculating R2 score...')
+
+        print("Calculating R2 score...")
         residuals = torch.cat(self.residuals, dim=0)
-        r2 = 1 - torch.mean(residuals ** 2) / 0.886
-        self.log('val_r2', r2.item(), prog_bar=True, on_epoch=True)
-        mse = torch.mean(residuals ** 2) 
-        self.log('val_mse', mse.item(), prog_bar=True, on_epoch=True)
+        r2 = 1 - torch.mean(residuals**2) / 0.886
+        self.log("val_r2", r2.item(), prog_bar=True, on_epoch=True)
+        mse = torch.mean(residuals**2)
+        self.log("val_mse", mse.item(), prog_bar=True, on_epoch=True)
 
         self.residuals = []
-
 
     def training_step(self, batch, batch_idx):
         return self.step(batch, self.train_metrics, "train", batch_idx)
@@ -226,11 +236,16 @@ class LitModel(L.LightningModule):
     def configure_optimizers(self):
         if self.use_schedulefree:
             opt = AdamWScheduleFree(
-                list(self.model.parameters()) + list(self.loss_func.parameters()) if self.use_robust else self.model.parameters(),
+                (
+                    list(self.model.parameters()) + list(self.loss_func.parameters())
+                    if self.use_robust
+                    else self.model.parameters()
+                ),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
                 warmup_steps=3000,
                 betas=(0.95, 0.999),
+                eps=1e-7,
             )
             self.opt = opt
             return opt
@@ -311,7 +326,7 @@ if __name__ == "__main__":
     ]
 
     if not (args.debug or args.lr_find):
-        
+
         wandb.init(
             project="leap",
             config={**cfg_loader.model_dump(), **cfg_data.model_dump()},
@@ -319,7 +334,6 @@ if __name__ == "__main__":
         )
         logger = L.pytorch.loggers.WandbLogger()
         run_name = wandb.run.name if wandb.run is not None else "debug"
-        
 
         # Add save model callback
         checkpoint_callback = ModelCheckpoint(
@@ -340,8 +354,9 @@ if __name__ == "__main__":
         val_check_interval=20000,
         callbacks=callbacks,
         enable_model_summary=True,
-        # precision="bf16-mixed",
+        # precision="16-mixed",
         gradient_clip_val=1.0,
+        benchmark=True,
         # strategy=DDPStrategy(gradient_as_bucket_view=True, static_graph=True),
     )
 

@@ -21,12 +21,10 @@ from x_transformers.x_transformers import (
 )
 
 
+from sigma_reparam import remove_all_normalization_layers, convert_to_sn
 # Enable TFfloat32
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
 
 torch._dynamo.config.cache_size_limit = 256
-
 
 class SinusoidalPosEmb(nn.Module):
     """
@@ -1012,6 +1010,7 @@ class Net(nn.Module):
         depth=20,
         frac_idxs=None,
         inc_1d_norm = True,
+        sigma_reparam = False
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
@@ -1072,9 +1071,9 @@ class Net(nn.Module):
                 dim=dim,
                 depth=depth,
                 heads=dim // 64,
-                #use_simple_rmsnorm=True,
+                use_simple_rmsnorm=True,
                 rotary_pos_emb=True,
-                #attn_num_mem_kv=16,
+                attn_num_mem_kv=16,
                 #ff_swish=True,
                 #ff_glu=True,
                 #attn_talking_heads=True,
@@ -1083,7 +1082,7 @@ class Net(nn.Module):
                 attn_dropout=0.0,
                 # ff_relu_squared=True,
                 ff_dropout=0.0,
-                # logit_softclamp_value=30,
+                #attn_logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
                 # gate_residual=True,
@@ -1109,6 +1108,7 @@ class Net(nn.Module):
         )
 
         self.final_mult = 16
+
         # out_3d = num_3d_out * self.final_mult * num_vert
 
         # self.out_3d = nn.Sequential(Block(dim),
@@ -1136,6 +1136,9 @@ class Net(nn.Module):
         self.out_2d = nn.Sequential(
             nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
         )
+
+        if sigma_reparam:
+            self.blocks = remove_all_normalization_layers(convert_to_sn(self.blocks))
 
     def forward(self, x):
         x_point, x_1d, x_1d_re = x

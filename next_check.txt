@@ -1,0 +1,1 @@
+models/model-step=400000-val_mse=0.182.ckpt
