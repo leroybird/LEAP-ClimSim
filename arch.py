@@ -1006,7 +1006,7 @@ class Net(nn.Module):
         num_static=0,
         num_vert=60,
         dim=1024,
-        depth=40,
+        depth=30,
         frac_idxs=None,
         inc_1d_norm = True,
         sigma_reparam = False
@@ -1069,18 +1069,18 @@ class Net(nn.Module):
             AttentionLayers(
                 dim=dim,
                 depth=depth,
-                heads=dim // 64,
+                heads=dim // 128,
                 use_simple_rmsnorm=True,
                 rotary_pos_emb=True,
                 attn_num_mem_kv=16,
                 #ff_swish=True,
                 #ff_glu=True,
                 #attn_talking_heads=True,
-                # attn_qk_norm=False,  # set to True
-                attn_flash=False,
+                #attn_qk_norm=True,  # set to True
+                attn_flash=True,
                 attn_dropout=0.0,
                 # ff_relu_squared=True,
-                ff_dropout=.2,
+                ff_dropout=.0,
                 #attn_logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1

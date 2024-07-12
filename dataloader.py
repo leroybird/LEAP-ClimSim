@@ -10,7 +10,7 @@ import logging
 import polars as pl
 from torch.utils.data import DataLoader
 import norm
-
+from random import random
 
 def get_static(grid_info):
     lat, lon = grid_info["lat"].values, grid_info["lon"].values
@@ -559,12 +559,26 @@ def get_idxs(num, num_workers, seed=42):
 #         return self.gen()
 
 
+import os
+
+def get_rank():
+    for env_var in ['RANK', 'LOCAL_RANK', 'SLURM_PROCID', 'PMI_RANK']:
+        rank = os.environ.get(env_var)
+        if rank is not None:
+            return int(rank)
+    return 0
+
 class InnerDataLoader(torch.utils.data.IterableDataset):
     def __init__(self, inner_ds, num_workers=12, seed=42, batch_size=128):
         self.inner_ds = inner_ds
         self.num_workers = num_workers
         self.seed = seed
-        self.gen = np.random.RandomState(seed)
+        # Add distributed rank to the seed
+        # Get the rank id
+        self.seed += get_rank()
+        self.gen = np.random.RandomState(self.seed)
+        print(f'Seed {self.seed}' )
+        torch.manual_seed(self.seed)
         self.dl = DataLoader(
             inner_ds,
             num_workers=num_workers,
@@ -574,6 +588,8 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
             prefetch_factor=2,
             collate_fn=concat_collate,
             shuffle=True,
+            
+            
         )
         assert (384 * num_workers) % batch_size == 0
 
@@ -581,7 +597,7 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
         self.dl_iter = None
 
     def __iter__(self):
-        print("Starting generator")
+        print(f"Starting generator with seed {self.seed}")
         self.dl_iter = iter(self.dl)
 
         return self.generator() 
@@ -659,7 +675,7 @@ def setup_dataloaders(
 
     if loader_cfg.use_iterable_train:
         train_ds = InnerDataLoader(
-            inner_train_ds, num_workers=12, batch_size=loader_cfg.batch_size
+            inner_train_ds, num_workers=64, batch_size=loader_cfg.batch_size
         )
 
         dl_kwargs = dict(

@@ -3,14 +3,14 @@ import polars as pl
 
 
 class LoaderConfig(BaseModel):
-    base_path: str = "/mnt/ssd/kaggle"
-    index_path: str = f"{base_path}/index_fwd.parquet"
+    base_path: str = "/data"
+    index_path: str = f"{base_path}/index.parquet"
     grid_info_path: str = f"{base_path}/ClimSim_low-res_grid-info.nc"
-    root_folder: str = f"{base_path}/train"
+    root_folder: str = f"{base_path}/trian"
 
     weights_path: str = f"{base_path}/sample_submission.csv"
     sample_submission_path: str = f"{base_path}/new_data/sample_submission.csv"
-    train_kaggle_path: str = f"{base_path}/train2.parquet"
+    train_kaggle_path: str = f"{base_path}/train_header.parquet"
     train_kaggle_csv: str = f"{base_path}/train.csv"
     test_kaggle_path: str = f"{base_path}/new_data/test.csv"
     x_stats_path: str = "x_stats_v2_1.json"
@@ -22,7 +22,7 @@ class LoaderConfig(BaseModel):
     use_iterable_train: bool = True
 
     apply_norm: bool = True
-    batch_size: int = 256
+    batch_size: int = 128
 
     x_tanh: bool = True
     x_mask_thresh: float | None = None

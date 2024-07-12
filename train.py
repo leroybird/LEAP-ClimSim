@@ -20,7 +20,6 @@ from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
 from lightning.pytorch.tuner import Tuner
 #from kornia import losses
 
-import robust_loss_pytorch.general
 
 torch._dynamo.config.cache_size_limit = 512
 
@@ -142,7 +141,7 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 2e-3
+        self.learning_rate = 1e-3
         self.scheduler_steps = 200_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
@@ -175,6 +174,7 @@ class LitModel(L.LightningModule):
                 prog_bar=True,
                 on_step=step_name == "train",
                 on_epoch=step_name == "val",
+                sync_dist=True
             )
 
             for metric in metrics:
@@ -182,6 +182,7 @@ class LitModel(L.LightningModule):
                     f"{step_name}_{metric.__name__}",
                     metric(pred, y).item(),
                     prog_bar=False,
+                    sync_dist=True
                 )
 
         return loss

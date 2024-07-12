@@ -13,7 +13,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from timm.models.layers import to_2tuple
 
 
 class SpectralNormedWeight(nn.Module):
