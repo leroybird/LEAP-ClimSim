@@ -1,4 +1,5 @@
 from functools import partial
+from pathlib import Path
 from lightning.pytorch.strategies import DDPStrategy
 import argparse
 from matplotlib import pyplot as plt
@@ -12,13 +13,16 @@ import torch.nn as nn
 import config
 import arch
 import dataloader
-#import torch_optimizer as optim
+
+# import torch_optimizer as optim
 from scheduler import CyclicCosineDecayLR
 from schedulefree import AdamWScheduleFree
 from lightning.pytorch.callbacks import StochasticWeightAveraging
 from lightning.pytorch.callbacks import ModelSummary, ModelCheckpoint
 from lightning.pytorch.tuner import Tuner
-#from kornia import losses
+import torch_optimizer as optim
+
+# from kornia import losses
 
 import robust_loss_pytorch.general
 
@@ -97,6 +101,7 @@ class LitModel(L.LightningModule):
         setup_dataloader=True,
         pt_compile=False,
         use_robust=False,
+        use_schedulefree=True,
     ):
         super().__init__()
 
@@ -142,9 +147,9 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 2e-3
+        self.learning_rate = 5e-4
         self.scheduler_steps = 200_000
-        self.use_schedulefree = True
+        self.use_schedulefree = use_schedulefree
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
 
@@ -250,32 +255,44 @@ class LitModel(L.LightningModule):
             self.opt = opt
             return opt
         else:
-            opt = torch.optim.AdamW(
+            # opt = torch.optim.AdamW(
+            #    self.model.parameters(),
+            #    lr=self.learning_rate,
+            #    weight_decay=1e-4,
+            # )
+            opt = optim.RAdam(
                 self.model.parameters(),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
+                betas=(0.95, 0.999),
+                eps=1e-7,
             )
-
             # opt = torch.optim.AdamW(
             #     self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001
             # )
-            # opt = optim.Lookahead(opt, k=5, alpha=0.5)
-            scheduler = CyclicCosineDecayLR(
-                opt,
-                init_decay_epochs=self.scheduler_steps,
-                min_decay_lr=1e-8,
-                restart_interval=5000,
-                restart_lr=2e-8,
-                warmup_epochs=1000,
-                warmup_start_lr=self.learning_rate / 100,
-                restart_interval_multiplier=1.4,
+            opt = optim.Lookahead(opt, k=5, alpha=0.5)
+            # scheduler = CyclicCosineDecayLR(
+            #    opt,
+            #    init_decay_epochs=500_000,
+            # min_decay_lr=1e-8,
+            # restart_interval=60_000,
+            # # restart_lr=1e-4,
+            #     warmup_epochs=1000,
+            # warmup_start_lr=1e-5,
+            # restart_interval_multiplier=1.0,
+            # verbose=True,
+            # )
+            lr_sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+                opt, T_0=180_001, T_mult=1, eta_min=1e-7, last_epoch=-1
             )
 
             lr_scheduler = {
-                "scheduler": scheduler,  # The LR scheduler instance (required)
+                "scheduler": lr_sched,  # The LR scheduler instance (required)
                 "interval": "step",  # The unit of the scheduler's step size
                 "frequency": 1,  # The frequency of the scheduler
             }
+
+            print("Configuring optimizer")
 
             self.opt = opt
 
@@ -318,8 +335,14 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--lr_find", action="store_true")
     parser.add_argument("--no_compile", action="store_true")
+    parser.add_argument("--cycle", action="store_true")
     args = parser.parse_args()
-    lit_model = get_model(cfg_data, cfg_loader, args.resume)
+    lit_model = get_model(
+        cfg_data,
+        cfg_loader,
+        args.resume,
+        use_schedulefree=not args.cycle,
+    )
 
     callbacks = [
         ModelSummary(max_depth=8),
@@ -335,18 +358,42 @@ if __name__ == "__main__":
         logger = L.pytorch.loggers.WandbLogger()
         run_name = wandb.run.name if wandb.run is not None else "debug"
 
-        # Add save model callback
-        checkpoint_callback = ModelCheckpoint(
-            monitor="val_mse",
-            dirpath="checkpoints/",
-            filename=f"{run_name}" + "-{step:06d}-{val_mse:.3f}",
-            save_top_k=3,
-            mode="min",
-        )
+        if args.cycle:
+            output_path = Path(f"/mnt/storage/kaggle/checkpoints/{run_name}")
+            output_path.mkdir(exist_ok=True, parents=True)
+            print(f"Saving checkpoints to {output_path}")
+            # Save every 10k steps
+            checkpoint_callback = ModelCheckpoint(
+                monitor=None,
+                dirpath=output_path,
+                filename="model-{step:08d}",
+                every_n_train_steps=40_000,
+                save_weights_only=True,
+            )
+            callbacks.append(
+                L.pytorch.callbacks.LearningRateMonitor(logging_interval="step")
+            )
+
+        else:
+            # Add save model callback
+            checkpoint_callback = ModelCheckpoint(
+                monitor="val_mse",
+                dirpath="checkpoints/",
+                filename=f"{run_name}" + "-{step:06d}-{val_mse:.3f}",
+                save_top_k=3,
+                mode="min",
+                verbose=True,
+            )
         callbacks.append(checkpoint_callback)
 
     else:
         logger = None
+
+    # callbacks.append(
+    #     L.pytorch.callbacks.StochasticWeightAveraging(swa_lrs=1e-2,
+    #                               swa_epoch_start=1,
+    #                               annealing_epochs=4,
+    #                               ))
 
     trainer = L.Trainer(
         max_epochs=1000,

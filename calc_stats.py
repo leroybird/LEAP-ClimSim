@@ -255,21 +255,87 @@ y_zero_mask
 range_sub = y_range.copy()
 range_sub[range_sub > max_range] = max_range
 #%%
-y_std *= 
 #%% 
 plt.plot(y_range[start:end])
 
 #%%
-a = (1200 * y_train[:, 0:6*60])/(x_train[:, 0:6*60])
-a[x_train[:, 0:60] == 0] = 0
+def get_classification_mask(y_zero_mask):
+    y_zero_mask = ~y_zero_mask.copy()
+    y_zero_mask[0:60*2] = False
+    y_zero_mask[60*4:] = False
+    return y_zero_mask
 #%%
-a[x_train[:, 0:6*60] == 0] = 0
+y_class_mask = get_classification_mask(y_zero_mask)
+#%%
+np.array(TARGET_COLS)[y_class_mask]
+#%%
+def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
+    x_data = x_raw[:, 0:y_raw.shape[1]][:, mask].copy()
+    y_data = y_raw[:, mask].copy()
+    
+    ratio = (1200 * y_data) / x_data
+    ratio[np.isnan(ratio)] = 0
+    assert ratio.min() >= -1
+    
+    out = np.zeros_like(ratio, dtype=np.int64)
+    out_ratios = np.zeros_like(ratio, dtype=np.float32)
+    
+    thresh_r = 1 - thresh
+
+    assert (x_data >= 0).all()
+    non_zeros = np.abs(y_raw) >= y_std*thresh
+    
+    mask_one = ratio < -thresh_r
+    mask_two = (ratio >= -thresh_r) & (ratio <= thresh_r)
+    
+    mask_there = ratio > thresh_r
+    
+    assert not (mask_one & mask_two).any()
+    assert not (mask_one & mask_there).any()
+    assert not (mask_two & mask_there).any()
+    mask_one[~non_zeros] = False
+    mask_two[~non_zeros] = False
+    mask_there[~non_zeros] = False
+    
+    out[mask_one] = 1
+    out[mask_two] = 2
+    out[mask_there] = 3
+    
+    out_ratios[mask_two] = ratio[mask_two]
+    assert out_ratios.min() >= -thresh_r
+    assert out_ratios.max() <= thresh_r
+    
+    return out, out_ratios
+
+#%%
+out, ratios = get_classification_ratio_labels(x_train, y_train, y_class_mask, y_std, thresh=0.01)
+#%%
+x_data = x_train[:, 0:y_train.shape[1]][:, mask].copy()
+y_data = y_train[:, mask].copy()
+
+ratio = (1200 * y_data) / x_data
+ratio[np.isnan(ratio)] = 0
+#%%
+
+#%%
+a = (1200 * y_train[:, 0:6*60])/(x_train[:, 0:6*60])
+#%%
 #%%
 plt.plot(mask)
+#%%
+
+
+
+
+
 #%%
 from collections import defaultdict
 output = defaultdict(list)
 output_pos_ranges = defaultdict(list)
+
+
+
+
 
 !mkdir -p plots
 for n, (col, m) in enumerate(zip(TARGET_COLS, mask)):
@@ -290,16 +356,16 @@ for n, (col, m) in enumerate(zip(TARGET_COLS, mask)):
         y_pos_m = ratio > max_value*2
         assert y_neg_m.sum() + y_middle_m.sum() + y_pos_m.sum() == y_data.shape[0]
         
-        y_neg_v = 100*np.abs(y_data[y_neg_m]).sum() / np.abs(y_data).sum()
-        y_middle_v = 100*np.abs(y_data[y_middle_m]).sum() / np.abs(y_data).sum()
-        y_pos_v = 100*np.abs(y_data[y_pos_m]).sum() / np.abs(y_data).sum()
+        y_neg_v = 100*np.abs(y_data[y_neg_m]**2).sum() / np.abs(y_data**2).sum()
+        y_middle_v = 100*np.abs(y_data[y_middle_m]**2).sum() / np.abs(y_data**2).sum()
+        y_pos_v = 100*np.abs(y_data[y_pos_m]**2).sum() / np.abs(y_data**2).sum()
         
         y_pos_max = y_data[y_pos_m].max() if y_pos_m.sum() > 0 else 0
         y_pos_min = y_data[y_pos_m].min() if y_pos_m.sum() > 0 else 0
         output_pos_ranges['pos_range'].append((y_pos_max - y_pos_min)/y_std[n])
         output_pos_ranges['index'].append(col)
         
-        y_zero_t = 100*np.abs(y_train[~zero_mask, n]).sum() / np.abs(y_data).sum()
+        y_zero_t = 100*np.abs(y_train[~zero_mask, n]**2).sum() / np.abs(y_data).sum()
         output['index'].append(col)
         output['non_zero'].append(100*zero_mask.sum()/zero_mask.shape[0])
         
@@ -338,7 +404,7 @@ output.to_csv('q_metadata.csv', index=True)
 #plt.figure()
 target = 'q0003'
 subset = output[output['index'].str.contains(target)]
-subset.plot(figsize=(16,16))
+subset.plot(figsize=(12,12))
 
 #%%
 !mkdir -p plots2
@@ -347,7 +413,7 @@ for n, (col, m) in enumerate(zip(TARGET_COLS, mask)):
         plt.figure(figsize=(12, 12))
         plt.hist(x_train[:, n] - x_mean[n], bins=100)
         plt.hist(y_train[:, n]*1200, bins=100, alpha=0.5)
-        
+        plt.ylim(0, 100)
         plt.savefig(f'plots2/{col}.png')
         plt.close()
 
