@@ -141,7 +141,7 @@ class LitModel(L.LightningModule):
             mse_v,
             mse_point,
         ]
-        self.learning_rate = 1e-3
+        self.learning_rate = 6e-3
         self.scheduler_steps = 200_000
         self.use_schedulefree = True
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)

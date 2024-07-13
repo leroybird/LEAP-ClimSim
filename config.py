@@ -3,7 +3,7 @@ import polars as pl
 
 
 class LoaderConfig(BaseModel):
-    base_path: str = "/data"
+    base_path: str = "/data/leap"
     index_path: str = f"{base_path}/index.parquet"
     grid_info_path: str = f"{base_path}/ClimSim_low-res_grid-info.nc"
     root_folder: str = f"{base_path}/trian"
@@ -22,7 +22,7 @@ class LoaderConfig(BaseModel):
     use_iterable_train: bool = True
 
     apply_norm: bool = True
-    batch_size: int = 64
+    batch_size: int = 256
 
     x_tanh: bool = True
     x_mask_thresh: float | None = None

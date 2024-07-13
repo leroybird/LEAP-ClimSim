@@ -675,7 +675,7 @@ def setup_dataloaders(
 
     if loader_cfg.use_iterable_train:
         train_ds = InnerDataLoader(
-            inner_train_ds, num_workers=64, batch_size=loader_cfg.batch_size
+            inner_train_ds, num_workers=32, batch_size=loader_cfg.batch_size
         )
 
         dl_kwargs = dict(
