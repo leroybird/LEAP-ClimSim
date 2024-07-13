@@ -1,4 +1,3 @@
-
 # from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
 import math
@@ -21,9 +20,11 @@ from x_transformers.x_transformers import (
 
 
 from sigma_reparam import remove_all_normalization_layers, convert_to_sn
+
 # Enable TFfloat32
 
 torch._dynamo.config.cache_size_limit = 256
+
 
 class SinusoidalPosEmb(nn.Module):
     """
@@ -1008,15 +1009,14 @@ class Net(nn.Module):
         dim=256,
         depth=20,
         frac_idxs=None,
-        inc_1d_norm = True,
-        sigma_reparam = False
+        inc_1d_norm=True,
+        sigma_reparam=False,
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
         self.num_static = num_static
         self.inc_1d_norm = inc_1d_norm
 
-        
         num_in_2d = num_in_2d
 
         # if use_emb:
@@ -1046,9 +1046,9 @@ class Net(nn.Module):
                 "b (c z) k -> b (c k) z", c=num_in_2d * mult_fac_2d, z=num_vert, k=1
             ),
         )
-        
+
         if self.inc_1d_norm:
-            num_3d_in *=  2
+            num_3d_in *= 2
         else:
             print("No 1D norm")
         self.layer_re_1d = Rearrange("b (c z) -> b c z", z=num_vert)
@@ -1073,15 +1073,15 @@ class Net(nn.Module):
                 use_simple_rmsnorm=True,
                 rotary_pos_emb=True,
                 attn_num_mem_kv=16,
-                #ff_swish=True,
-                #ff_glu=True,
-                #attn_talking_heads=True,
+                # ff_swish=True,
+                # ff_glu=True,
+                # attn_talking_heads=True,
                 # attn_qk_norm=False,  # set to True
                 attn_flash=True,
                 attn_dropout=0.0,
-                #ff_relu_squared=True,
-                #ff_dropout=.2,
-                #attn_logit_softclamp_value=30,
+                # ff_relu_squared=True,
+                # ff_dropout=.2,
+                # attn_logit_softclamp_value=30,
                 # attn_qk_norm_groups=8,
                 # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
                 # gate_residual=True,
@@ -1093,7 +1093,7 @@ class Net(nn.Module):
                 # attn_qk_norm=True,
                 # attn_qk_norm_dim_scale=True,
                 pre_norm=True,
-                #sandwich_norm=True,
+                # sandwich_norm=True,
                 # attn_use_cope=True,
                 # attn_cope_max_pos=16,
                 # attn_cope_soft_onehot_pos=False,  #
@@ -1141,10 +1141,10 @@ class Net(nn.Module):
 
     def forward(self, x):
         x_point, x_1d, x_1d_re = x
-        
+
         xp_1d = self.layer_proj_1d(x_point[..., None])
         x_1d = self.layer_re_1d(x_1d)
-        
+
         x_1d_re = rearrange(x_1d_re, "b z c -> b c z")
         if self.inc_1d_norm:
             x_1d = torch.cat((x_1d, x_1d_re), dim=1)

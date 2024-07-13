@@ -267,15 +267,18 @@ def get_classification_mask(y_zero_mask):
 #%%
 y_class_mask = get_classification_mask(y_zero_mask)
 #%%
-np.array(TARGET_COLS)[y_class_mask]
+plt.plot(y_class_mask)
+#%%
+np.array(TARGET_COLS)[y_class_mask][:49]
 #%%
 def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
     x_data = x_raw[:, 0:y_raw.shape[1]][:, mask].copy()
     y_data = y_raw[:, mask].copy()
-    
+    y_std = y_std[mask]
+     
     ratio = (1200 * y_data) / x_data
     ratio[np.isnan(ratio)] = 0
-    assert ratio.min() >= -1
+    assert ratio.min() >= -1 - 1e-6
     
     out = np.zeros_like(ratio, dtype=np.int64)
     out_ratios = np.zeros_like(ratio, dtype=np.float32)
@@ -283,7 +286,7 @@ def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
     thresh_r = 1 - thresh
 
     assert (x_data >= 0).all()
-    non_zeros = np.abs(y_raw) >= y_std*thresh
+    non_zeros = np.abs(y_data) >= y_std*thresh
     
     mask_one = ratio < -thresh_r
     mask_two = (ratio >= -thresh_r) & (ratio <= thresh_r)
@@ -310,10 +313,77 @@ def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
 #%%
 out, ratios = get_classification_ratio_labels(x_train, y_train, y_class_mask, y_std, thresh=0.01)
 #%%
-x_data = x_train[:, 0:y_train.shape[1]][:, mask].copy()
-y_data = y_train[:, mask].copy()
+def plot(ratios, out, y_class_mask, y_train, y_std):
+    x_label = np.array(TARGET_COLS)[y_class_mask]
+    y0_amount = (out==0).sum(axis=0).astype(np.float32)/out.shape[0]
+    y1_amount = (out==1).sum(axis=0).astype(np.float32)/out.shape[0]
+    y2_amount = (out==2).sum(axis=0).astype(np.float32)/out.shape[0]
+    y3_amount = (out==3).sum(axis=0).astype(np.float32)/out.shape[0]
+    
+    y_avg = np.abs(y_train[:, y_class_mask]).sum(axis=0)
+    y0_contrib = []
+    y1_contrib = []
+    y2_contrib = []
+    y3_contrib = []
+    
+    for n in range(y_avg.shape[0]):
+        y0_contrib.append(np.abs(y_train[out[:, n] == 0]).sum()/y_avg[n])
+        y1_contrib.append(np.abs(y_train[out[:, n] == 1]).sum()/y_avg[n])
+        y2_contrib.append(np.abs(y_train[out[:, n] == 2]).sum()/y_avg[n])
+        y3_contrib.append(np.abs(y_train[out[:, n] == 3]).sum()/y_avg[n])
+
+    plt.figure(figsize=(12, 12))
+    plt.ylim(0, 1)
+    plt.plot(x_label, y0_amount, label='0')
+    plt.plot(x_label, y1_amount, label='1')
+    plt.plot(x_label, y2_amount, label='2')
+    plt.plot(x_label, y3_amount, label='3')
+    plt.xticks(rotation=90)
+    plt.legend()
+    plt.savefig('classification_ratios.png', dpi=250)
+    
+    plt.figure(figsize=(12, 12))
+
+    plt.plot(x_label, y0_contrib, label='0')
+    plt.plot(x_label, y1_contrib, label='1')
+    plt.plot(x_label, y2_contrib, label='2')
+    plt.plot(x_label, y3_contrib, label='3')
+    plt.xticks(rotation=90)
+    plt.legend()
+    plt.savefig('classification_contrib.png', dpi=250)
+    plt.show()
+    
+    # plt.figure(figsize=(12, 12))
+    # plt.plot(x_label, ratios.std(axis=0))
+    # plt.plot(ratios.mean(axis=0))
+    # plt.plot(ratios.min(axis=0))
+    
+    plt.show()
+    plt.savefig('classification_r.png', dpi=250)
+#%%
+plot(ratios, out, y_class_mask, y_train, y_std)
+2#%%
+x_data = x_train[:, 0:y_train.shape[1]][:, y_class_mask].copy()
+y_data = y_train[:, y_class_mask].copy()
 
 ratio = (1200 * y_data) / x_data
+#%%
+ratio[np.isnan(ratio)] = 0
+#%%
+ratio.min()
+#%%
+r2 = ratio.copy()
+r2[r2 > 2] = 2
+#%%
+!mkdir -p plots3/
+#%%
+for n, col in enumerate(np.array(TARGET_COLS)[y_class_mask]):
+    plt.figure(figsize=(12, 12))
+    plt.title(col)
+    plt.hist(r2[:, n], bins=100)
+    plt.savefig(f'plots3/{col}.png')
+    plt.close()
+#%%
 ratio[np.isnan(ratio)] = 0
 #%%
 

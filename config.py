@@ -22,7 +22,7 @@ class LoaderConfig(BaseModel):
     use_iterable_train: bool = True
 
     apply_norm: bool = True
-    batch_size: int = 256
+    batch_size: int = 512
 
     x_tanh: bool = True
     x_mask_thresh: float | None = None
