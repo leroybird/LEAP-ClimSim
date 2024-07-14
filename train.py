@@ -138,7 +138,7 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
 
         targ = targ_batch["y"].detach().cpu().numpy()
         targ_sub = targ[:, mask_class_cols]
-        
+
         raw_reg = pred_batch["reg"].detach().cpu().numpy().copy()
         raw_reg_sub = raw_reg[:, mask_class_cols]
 
@@ -171,11 +171,11 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
             raw_out = np.zeros_like(raw_reg_sub)
             raw_out[mask_one] = -x_raw[mask_one] / 1200
             assert not (raw_out == 0).all()
-            raw_out = y_norm.y_norm.stds.squeeze()[mask_class_cols] * raw_out
-            raw_out += y_norm.y_norm.means.squeeze()[mask_class_cols]
+            raw_out -= y_norm.y_norm.means[:, mask_class_cols]
+            raw_out = raw_out / y_norm.y_norm.stds[:, mask_class_cols]
 
             output["resi_neg"] = get_resi(raw_out, mask_one)
-            #output["diff_neg"] = get_diff(raw_out, mask_one)
+            # output["diff_neg"] = get_diff(raw_out, mask_one)
 
     return output
 

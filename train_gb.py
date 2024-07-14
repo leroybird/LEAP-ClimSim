@@ -6,60 +6,74 @@ import pandas as pd
 import numpy as np
 import sklearn.linear_model
 from sklearn.metrics import r2_score
-
+import dataloader
 import norm
 import config
-#%%
+import torch
+import tqdm
+
+# %%
 cfg_loader = config.LoaderConfig()
 cfg_data = config.get_data_config(cfg_loader)
 
 norm_x, norm_y = norm.get_stats(cfg_loader, cfg_data)
 
 # %%
-base_path = Path("/mnt/storage/kaggle/raw_preds")
-test_path = Path("/mnt/storage/kaggle/raw_preds_val")
-
+input_test = list(Path("model_preds/").glob("*test.pt"))
+input_val = [
+    fname.with_name(fname.name.replace("test.pt", "valid.pt")) for fname in input_test
+]
+# %%
+for fname in input_test:
+    assert fname.exists()
+# %%
+all_test = []
+for fname in input_test:
+    all_test.append(torch.load(fname)["reg"])
+# %%
+all_val = []
+for fname in input_val:
+    all_val.append(torch.load(fname)["reg"])
 
 # %%
-def load_data(path):
-    x = pl.read_parquet(path / "x_all.parquet").to_numpy()
-    y = pl.read_parquet(path / "y_all.parquet").to_numpy()
-    preds = pl.read_parquet(path / "pred_all.parquet").to_numpy()
-
-    # x = np.concatenate([x, preds], axis=1)
-
-    weightings = pd.read_csv("/mnt/ssd/kaggle/sample_submission.csv", nrows=1)
-    weighting = weightings.iloc[0, 1:].values  # .astype(np.float32)
-
-    y = y * weighting
-
-    return x, y, preds, weighting
-
-
+_, val_dl = dataloader.setup_dataloaders(cfg_loader, cfg_data)
 # %%
-x, y, preds, weighting = load_data(base_path)
+# val_data_y = []
+# val_data_x = []
+# for batch in val_dl:
+#     val_data_y.append(batch["y"].numpy())
+
+#     val_data_x.append(batch[0].numpy())
 # %%
-x_test, y_test, preds_test, _ = load_data(test_path)
+# val_data = np.concatenate(val_data, axis=0)
+# # %%
+# torch.save(val_data, "val_data_y.pt")
+# %%
+# Take average# %%
+val_data = torch.load("val_data_y.pt")
+# %%
+test_df = pl.read_csv("/mnt/ssd/kaggle/new_data/test.csv")
+test_df
+# %%
+# test_df.write_parquet("/mnt/ssd/kaggle/new_data/test.parquet")
+# %%
+test_data = test_df[:, 1 : val_data.shape[1] + 1].to_numpy()
+test_data.shape
+# %%
+
+# # %%
+# x_test, y_test, preds_test, _ = load_data(test_path)
 # %%
 lgbm_params = {
     "boosting_type": "gbdt",
     "objective": "regression",
     "metric": ["l2"],
-    "learning_rate": 0.15,
-    "feature_fraction": 0.9,
-    "bagging_fraction": 0.7,
-    "bagging_freq": 10,
-    "verbose": -10,
-    "max_depth": 10,
-    "num_leaves": 128,
-    "max_bin": 63,
-    "num_iterations": 200,
+    "num_iterations": 100,
     # "reg_alpha": 0.1,
     # "reg_lambda": 3.25,
     "device": "gpu",
+    "random_state": 42,
 }
-# %%
-preds.std(), y.std()
 # %%
 output_preds = []
 # %%
@@ -73,75 +87,120 @@ logging.basicConfig(
 import sklearn.linear_model
 
 # %%
+
+# %%
+# y_xgb = y[:, i] - preds[:, i]
+# y_xgb_test = y_test[:, i] - preds_test[:, i]
+# x_train_cat = np.concatenate([x, preds[:, i : i + 1]], axis=1)
+# x_test_cat = np.concatenate([x_test, preds_test[:, i : i + 1]], axis=1)
+
+val_data.shape
+all_val[0].shape
+# %%
+np.random.seed(42)
+x_train_mask = np.random.sample(len(val_data)) < 0.8
+x_val_mask = ~x_train_mask
+# %%
+all_val_av = np.stack(all_val, axis=0).mean(axis=0)
+
+# %%
+i = 0
+y_val = val_data[x_val_mask, i] - all_val_av[x_val_mask, i]
+y_train = val_data[x_train_mask, i] - all_val_av[x_train_mask, i]
+
+x_val = np.stack([a[x_val_mask, i] for a in all_val], axis=1)
+x_train = np.stack([a[x_train_mask, i] for a in all_val], axis=1)
+
+x_test = np.stack([a[:, i] for a in all_test], axis=1)
+# %%
+y_val.shape, y_train.shape, x_val.shape, x_train.shape, x_test.shape
+# %%
+model = lgb.LGBMRegressor(**lgbm_params)
+
+lgb_train = lgb.Dataset(x_train, y_train)
+lgb_eval = lgb.Dataset(x_val, y_val, reference=lgb_train)
+
+model.fit(
+    x_train,
+    y_train,
+    eval_set=[(x_val, y_val)],
+    eval_metric="mean_squared_error",
+    callbacks=[lgb.log_evaluation(10), lgb.early_stopping(10)],
+)
+# %%
+((y_val) ** 2).mean()
+# %%
+
+# %%
 preds_model = []
 ratios = []
 
-# r2_base_lst = []
-# r2_gb_lst = []
-for i, w in enumerate(weighting):
-    if w != 0:
-        y_xgb = y[:, i] - preds[:, i]
-        y_xgb_test = y_test[:, i] - preds_test[:, i]
-        x_train_cat = np.concatenate([x, preds[:, i : i + 1]], axis=1)
-        x_test_cat = np.concatenate([x_test, preds_test[:, i : i + 1]], axis=1)
+r2_base_lst = []
+r2_gb_lst = []
 
-        model = sklearn.linear_model.LinearRegression()
-        model.fit(x_train_cat, y_xgb)
+for i, w in enumerate(norm_y.zero_mask):
+    if w == False:
+        y_val = val_data[x_val_mask, i] - all_val_av[x_val_mask, i]
+        y_train = val_data[x_train_mask, i] - all_val_av[x_train_mask, i]
 
-        # model = lgb.LGBMRegressor(**lgbm_params)
+        x_val = np.stack([a[x_val_mask, i] for a in all_val], axis=1)
+        x_train = np.stack([a[x_train_mask, i] for a in all_val], axis=1)
 
-        # model.fit(
-        #     x_train_cat,
-        #     y_xgb,
-        #     eval_set=[(x_test_cat, y_xgb_test)],
-        #     eval_metric="mean_squared_error",
-        #     callbacks=[lgb.log_evaluation(10), lgb.early_stopping(10)],
-        # )
+        x_test = np.stack([a[:, i] for a in all_test], axis=1)
 
-        # lgb_train = lgb.Dataset(x_train_cat, y_xgb)
-        # lgb_eval = lgb.Dataset(x_test_cat, y_xgb_test, reference=lgb_train)
+        # model = sklearn.linear_model.LinearRegression()
+        # model.fit(x_train_cat, y_xgb)
 
-        # gbm = lgb.train(
-        #     lgbm_params,
-        #     lgb_train,
-        #     valid_sets=[lgb_eval],
-        # )
+        model = lgb.LGBMRegressor(**lgbm_params)
 
-        preds_gbm = model.predict(x_test_cat)
+        result = model.fit(
+            x_train,
+            y_train,
+            eval_set=[(x_val, y_val)],
+            eval_metric="mean_squared_error",
+            callbacks=[lgb.log_evaluation(10), lgb.early_stopping(10)],
+        )
 
-        r2_gb = r2_score(y_test[:, i], preds_gbm + preds_test[:, i])
-        r2_base = r2_score(y_test[:, i], preds_test[:, i])
+        preds_gbm = model.predict(x_test)
+
+        mse_gb = ((y_val - model.predict(x_val)) ** 2).mean()
+        mse_base = (y_val**2).mean()
 
     else:
-        r2_base = 0  # r2_score(y_test[:, i], preds_test[:, i])
-        r2_gb = 0
+        print(f"Skipping {i}")
+        mse_base = 0  # r2_score(y_test[:, i], preds_test[:, i])
+        mse_gb = 0
+        preds_gbm = np.zeros(x_test.shape[0])
 
-    # r2_base_lst.append(r2_base)
-    # r2_gb_lst.append(r2_gb)
+    r2_base_lst.append(mse_base)
+    r2_gb_lst.append(mse_gb)
     # r2_ratio_lst.append(r2_ratio)
     preds_model.append(preds_gbm)
-    print(f"Base: {r2_base:.5f}, GB: {r2_gb:.5f} diff: {r2_gb - r2_base:.5f} {i}")
-
+    print(f"Base: {mse_base:.5f}, GB: {mse_gb:.5f} diff: {mse_gb - mse_base:.5f} {i}")
+#%%
+# Add average preds 
+preds_gbm = np.stack(preds_model, axis=1)
+preds_gbm_final = preds_gbm + all_val_av
 # %%
 import matplotlib.pyplot as plt
-    
-ratio = -(x_test[:, :len(weighting)] * weighting[None, :]) / 1200
-#r2_ratio = r2_score(y_test[:, i], ratio)
-#%%
+
+ratio = -(x_test[:, : len(weighting)] * weighting[None, :]) / 1200
+# r2_ratio = r2_score(y_test[:, i], ratio)
+# %%
 mask = weighting != 0
 # %%
 ratio.shape
 r2_score(y_test, ratio, multioutput="raw_values")
-#%%
+# %%
 norm_y.zero_mask
-#%%
+# %%
 preds_test[:, norm_y.zero_mask] = 0
-#%% 
+# %%
 
 r2_score(y_test[:, mask], preds_test[:, mask])
-#%%
+# %%
 y_test[0] - preds_test[0]
-#%%
+# %%
 
 # %%
 diff = np.array(r2_gb_lst) - np.array(r2_base_lst)

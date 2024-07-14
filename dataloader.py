@@ -651,6 +651,8 @@ def setup_dataloaders(
         batch_size=1,
         collate_fn=concat_collate,
         pin_memory=True,
+        shuffle=False,
+        drop_last=False,
     )
 
     return train_dl, valid_loader
