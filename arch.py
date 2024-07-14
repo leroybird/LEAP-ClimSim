@@ -1118,6 +1118,7 @@ class Net(nn.Module):
             nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
         )
 
+        self.y_class = y_class
         if y_class:
             self.out_class = nn.Sequential(
                 nn.Conv1d(dim, num_3d_out * 4, 1),
@@ -1128,7 +1129,6 @@ class Net(nn.Module):
             )
 
             self.y_class_mask = y_class_mask
-            self.y_class = y_class
 
     def forward(self, batch):
         x_point, x_1d, x_1d_re = batch["x_p"], batch["x_1d"], batch["x_1d_re"]

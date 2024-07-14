@@ -267,7 +267,7 @@ class LitModel(L.LightningModule):
             loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
         if step_name == "val":
-            self.residuals["val_r2"].append(
+            self.residuals["r2"].append(
                 (pred[:, self.mask] - y[:, self.mask]).detach().cpu()
             )
 
@@ -286,14 +286,14 @@ class LitModel(L.LightningModule):
                         on_step=step_name == "train",
                         on_epoch=step_name == "val",
                     )
-            else:
-                self.log(
-                    f"{step_name}_loss",
-                    loss.item(),
-                    prog_bar=True,
-                    on_step=step_name == "train",
-                    on_epoch=step_name == "val",
-                )
+
+            self.log(
+                f"{step_name}_loss",
+                loss.item(),
+                prog_bar=True,
+                on_step=step_name == "train",
+                on_epoch=step_name == "val",
+            )
 
             for metric in metrics:
                 self.log(
@@ -320,10 +320,12 @@ class LitModel(L.LightningModule):
 
         for key, val in self.residuals.items():
             residuals = np.concatenate(val, axis=0)
-            r2 = 1 - np.mean(residuals**2) / 0.886
-            self.log(f"val_{key}", r2, prog_bar=True, on_epoch=True)
+            r2 = 1 - (np.mean(residuals**2) / 0.886)
+
+            self.log(f"val_{key}_r2", r2, prog_bar=True, on_epoch=True)
+
             mse = np.mean(residuals**2)
-            self.log(f"val_{key}", mse, prog_bar=True, on_epoch=True)
+            self.log(f"val_{key}_mse", mse, prog_bar=True, on_epoch=True)
 
         self.residuals = defaultdict(list)
 
@@ -517,9 +519,9 @@ if __name__ == "__main__":
         else:
             # Add save model callback
             checkpoint_callback = ModelCheckpoint(
-                monitor="val_mse",
+                monitor="val_loss",
                 dirpath="checkpoints/",
-                filename=f"{run_name}" + "-{step:06d}-{val_mse:.3f}",
+                filename=f"{run_name}" + "-{step:06d}-{val_loss:.4f}",
                 save_top_k=3,
                 mode="min",
                 verbose=True,
