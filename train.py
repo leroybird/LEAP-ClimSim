@@ -244,7 +244,7 @@ class LitModel(L.LightningModule):
                 ),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
-                warmup_steps=3000,
+                warmup_steps=1000,
                 betas=(0.95, 0.999),
                 eps=1e-7,
             )
