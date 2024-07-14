@@ -404,7 +404,6 @@ def set_seed(seed=42):
 def load_matching_weights(model, checkpoint_path):
     # Load the state dict from the checkpoint
     checkpoint = torch.load(checkpoint_path)["state_dict"]
-    print(checkpoint.keys())
     model_dict = model.state_dict()
 
     # Create a new state dict with only matching keys and shapes
@@ -424,7 +423,14 @@ def load_matching_weights(model, checkpoint_path):
     model.load_state_dict(model_dict)
 
 
-def get_model(cfg_data, cfg_loader, resume_path=None, p_resume_path=None, **kwargs):
+def get_model(
+    cfg_data,
+    cfg_loader,
+    model_cfg: config.ModelConfig,
+    resume_path=None,
+    p_resume_path=None,
+    **kwargs,
+):
 
     stats_y = load_from_json(cfg_loader.y_stats_path)
     y_zero_mask = stats_y["y_zero"]
@@ -436,6 +442,7 @@ def get_model(cfg_data, cfg_loader, resume_path=None, p_resume_path=None, **kwar
         cfg_data.num_vert_feat,
         cfg_data.num_2d_feat_y,
         cfg_data.num_vert_feat_y,
+        model_cfg,
         y_class=cfg_loader.y_class,
         y_class_mask=y_class_mask,
     )
@@ -478,9 +485,12 @@ if __name__ == "__main__":
 
     cfg_loader.y_class = args.y_class
 
+    model_cfg = config.ModelConfig()
+
     lit_model = get_model(
         cfg_data,
         cfg_loader,
+        model_cfg,
         args.resume,
         use_schedulefree=not args.cycle,
         p_resume_path=args.p_resume,

@@ -45,6 +45,29 @@ class DataConfig(BaseModel):
     fac_idxs: tuple[int, int] = (num_vert, num_vert * 4)
 
 
+class ModelConfig(BaseModel):
+    dim: int = 256
+    depth: int = 20
+    head_dim: int = 64
+
+    use_simple_rmsnorm: bool = True
+    rotary_pos_emb: bool = True
+    attn_num_mem_kv: int = 16
+
+    ff_swish: bool = False
+    ff_glu: bool = False
+
+    attn_talking_heads: bool = False
+    attn_flash: bool = True
+    attn_dropout: float = 0.0
+    ff_relu_squared: bool = False
+    ff_dropout: float = 0.0
+
+    pre_norm : bool = True
+    sandwich_norm : bool = False
+    
+    inc_1d_norm : bool = True
+    
 def get_data_config(loader_cfg: LoaderConfig):
     pl.Config(tbl_cols=-1)
     train_df = pl.read_parquet(loader_cfg.train_kaggle_path, n_rows=1)
