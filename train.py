@@ -1,8 +1,11 @@
+from collections import defaultdict
 from functools import partial
 from pathlib import Path
+from einops import rearrange
 from lightning.pytorch.strategies import DDPStrategy
 import argparse
 from matplotlib import pyplot as plt
+import numpy as np
 import torch
 import lightning as L
 import torch.distributed
@@ -15,6 +18,8 @@ import arch
 import dataloader
 
 # import torch_optimizer as optim
+from norm import get_classification_mask, load_from_json, get_stats
+
 from scheduler import CyclicCosineDecayLR
 from schedulefree import AdamWScheduleFree
 from lightning.pytorch.callbacks import StochasticWeightAveraging
@@ -92,6 +97,93 @@ def mse_point(pred, tar):
     return masked_mse(pred, tar, mask)
 
 
+class RegRatioClassLoss(nn.Module):
+    def __init__(self, w_class=1.0, w_reg=1.0, w_ratio=1.0):
+        super().__init__()
+        self.reg_loss = nn.HuberLoss(delta=2.0, reduction="none")
+        self.class_loss = nn.CrossEntropyLoss(reduction="none")
+        self.ratio_loss = nn.L1Loss(reduction="none")
+
+        self.w_class = w_class
+        self.w_reg = w_reg
+        self.w_ratio = w_ratio
+
+    def forward(self, pred: dict, batch: dict):
+        reg_loss = self.reg_loss(pred["reg"], batch["y"])
+
+        logit_class = pred["logits"]
+        logit_class = rearrange(logit_class, "b c i -> (b c) i")
+        target_class = rearrange(batch["y_cls"], "b c -> (b c)")
+        class_loss = self.class_loss(logit_class, target_class)
+
+        ratio_loss = self.ratio_loss(pred["ratio"], batch["y_ratios"])
+
+        total = (
+            class_loss.mean() * self.w_class
+            + reg_loss.mean() * self.w_reg
+            + ratio_loss.mean() * self.w_ratio
+        )
+
+        total = torch.mean(total)
+        return {
+            "loss": total,
+            "class_loss": torch.mean(class_loss),
+            "reg_loss": torch.mean(reg_loss),
+            "ratio_loss": torch.mean(ratio_loss),
+            "class_acc": (logit_class.argmax(dim=-1) == target_class).float().mean(),
+        }
+
+
+def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
+    output = {}
+    with torch.no_grad():
+        mask_class_cols = y_norm.class_mask.squeeze()
+
+        targ = targ_batch["y"].detach().cpu().numpy()
+
+        raw_reg = pred_batch["reg"].detach().cpu().numpy().copy()
+        raw_reg = y_norm.denorm(raw_reg)
+
+        raw_reg_sub = raw_reg[:, mask_class_cols].copy()
+
+        def get_resi(pred):
+            r = raw_reg.copy()
+            r[:, mask_class_cols] = pred
+            r = y_norm.y_norm(r)["y"]
+
+            return r - targ
+
+        y_raw = targ_batch["y_raw"].detach().cpu().numpy()
+        x_raw = targ_batch["x_raw"].detach().cpu().numpy()[:, 0 : y_raw.shape[1]]
+
+        y_raw = y_raw[:, mask_class_cols]
+        x_raw = x_raw[:, mask_class_cols]
+
+        y_class = pred_batch["logits"].detach().cpu().numpy()
+        y_class = np.argmax(y_class, axis=-1)
+
+        assert y_class.shape == y_raw.shape
+
+        mask_zero = y_class == 0
+        mask_one = y_class == 1
+        mask_two = y_class == 2
+        mask_three = y_class == 3
+
+        output["resi_base"] = get_resi(raw_reg_sub)
+        raw_reg_sub[mask_zero] = 0
+        output["resi_zero"] = get_resi(raw_reg_sub)
+
+        raw_reg_sub[mask_one] = -x_raw[mask_one] / 1200
+        output["resi_one"] = get_resi(raw_reg_sub)
+
+        raw_reg_sub[mask_two] = (
+            pred_batch["ratio"][mask_two].detach().cpu().numpy() * x_raw[mask_two]
+        )
+        output["resi_two"] = get_resi(raw_reg_sub)
+
+    return output
+
+
 class LitModel(L.LightningModule):
     def __init__(
         self,
@@ -100,7 +192,6 @@ class LitModel(L.LightningModule):
         cfg_loader,
         setup_dataloader=True,
         pt_compile=False,
-        use_robust=False,
         use_schedulefree=True,
     ):
         super().__init__()
@@ -117,43 +208,46 @@ class LitModel(L.LightningModule):
                 cfg_loader, cfg_data
             )
 
-        self.use_robust = use_robust
-        if use_robust:
-            print("Using robust loss")
-            self.loss_func = robust_loss_pytorch.adaptive.StudentsTLossFunction(
-                num_dims=368, float_dtype=torch.float32, device=torch.device("cuda:0")
-            )
+        self.x_norm, self.y_norm = get_stats(cfg_loader, cfg_data)
+
+        self.y_class = cfg_loader.y_class
+        if self.y_class:
+            self.loss_func = RegRatioClassLoss()
+
+            self.val_metrics = []
+            self.train_metrics = []
         else:
             self.loss_func = nn.HuberLoss(delta=2.0)
             # self.loss_func = partial(losses.cauchy_loss, reduction='mean')
 
-        self.val_metrics = [
-            fv.mae,
-            mse_t,
-            mse_q1,
-            mse_q2,
-            mse_q3,
-            mse_u,
-            mse_v,
-            mse_point,
-        ]
-        self.train_metrics = [
-            fv.mse,
-            mse_t,
-            mse_q1,
-            mse_q2,
-            mse_q3,
-            mse_u,
-            mse_v,
-            mse_point,
-        ]
+            self.val_metrics = [
+                fv.mae,
+                mse_t,
+                mse_q1,
+                mse_q2,
+                mse_q3,
+                mse_u,
+                mse_v,
+                mse_point,
+            ]
+            self.train_metrics = [
+                fv.mse,
+                mse_t,
+                mse_q1,
+                mse_q2,
+                mse_q3,
+                mse_u,
+                mse_v,
+                mse_point,
+            ]
+
         self.learning_rate = 5e-4
         self.scheduler_steps = 200_000
         self.use_schedulefree = use_schedulefree
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
         self.mask[:] = True
 
-        self.residuals = []
+        self.residuals = defaultdict(list)
         # self.mask[0:60] = True
         # self.mask[240:] = True
 
@@ -161,26 +255,45 @@ class LitModel(L.LightningModule):
         return self.model(x)
 
     def step(self, batch, metrics=[], step_name="train", batch_idx=0):
-        x, y = batch
 
-        pred = self.model(x)
-        if self.use_robust:
-            loss = self.loss_func(pred[:, self.mask] - y[:, self.mask])
-            loss = torch.mean(loss)
+        pred_batch = self.model(batch)
+        pred = pred_batch["reg"]
+        y = batch["y"]
+
+        if self.y_class:
+            loss_dict = self.loss_func(pred_batch, batch)
+            loss = loss_dict["loss"]
         else:
             loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
         if step_name == "val":
-            self.residuals.append((pred[:, self.mask] - y[:, self.mask]).detach().cpu())
+            self.residuals["val_r2"].append(
+                (pred[:, self.mask] - y[:, self.mask]).detach().cpu()
+            )
+
+            if self.y_class:
+                correct_preds = correct_preds_cls(pred_batch, batch, self.y_norm)
+                for key, val in correct_preds.items():
+                    self.residuals[key].append(val)
 
         if step_name != "train" or batch_idx % 20 == 0:
-            self.log(
-                f"{step_name}_loss",
-                loss.item(),
-                prog_bar=True,
-                on_step=step_name == "train",
-                on_epoch=step_name == "val",
-            )
+            if self.y_class:
+                for key, val in loss_dict.items():
+                    self.log(
+                        f"{step_name}_{key}",
+                        val.item(),
+                        prog_bar=True,
+                        on_step=step_name == "train",
+                        on_epoch=step_name == "val",
+                    )
+            else:
+                self.log(
+                    f"{step_name}_loss",
+                    loss.item(),
+                    prog_bar=True,
+                    on_step=step_name == "train",
+                    on_epoch=step_name == "val",
+                )
 
             for metric in metrics:
                 self.log(
@@ -204,13 +317,15 @@ class LitModel(L.LightningModule):
             self.opt.train()
 
         print("Calculating R2 score...")
-        residuals = torch.cat(self.residuals, dim=0)
-        r2 = 1 - torch.mean(residuals**2) / 0.886
-        self.log("val_r2", r2.item(), prog_bar=True, on_epoch=True)
-        mse = torch.mean(residuals**2)
-        self.log("val_mse", mse.item(), prog_bar=True, on_epoch=True)
 
-        self.residuals = []
+        for key, val in self.residuals.items():
+            residuals = np.concatenate(val, axis=0)
+            r2 = 1 - np.mean(residuals**2) / 0.886
+            self.log(f"val_{key}", r2, prog_bar=True, on_epoch=True)
+            mse = np.mean(residuals**2)
+            self.log(f"val_{key}", mse, prog_bar=True, on_epoch=True)
+
+        self.residuals = defaultdict(list)
 
     def training_step(self, batch, batch_idx):
         return self.step(batch, self.train_metrics, "train", batch_idx)
@@ -221,13 +336,10 @@ class LitModel(L.LightningModule):
         sub_batch_size = cfg_loader.batch_size
 
         count = 0
-        for i in range(0, len(batch[1]), sub_batch_size):
-            x = []
-            for i_x in range(len(batch[0])):
-                x.append(batch[0][i_x][i : i + sub_batch_size])
+        for i in range(0, len(batch["y"]), sub_batch_size):
+            sub_batch = {k: v[i : i + sub_batch_size] for k, v in batch.items()}
 
-            y = batch[1][i : i + sub_batch_size]
-            loss += self.step((x, y), self.val_metrics, "val", batch_idx)
+            loss += self.step(sub_batch, self.val_metrics, "val", batch_idx)
             count += 1
 
         return loss / count
@@ -241,11 +353,7 @@ class LitModel(L.LightningModule):
     def configure_optimizers(self):
         if self.use_schedulefree:
             opt = AdamWScheduleFree(
-                (
-                    list(self.model.parameters()) + list(self.loss_func.parameters())
-                    if self.use_robust
-                    else self.model.parameters()
-                ),
+                self.model.parameters(),
                 lr=self.learning_rate,
                 weight_decay=1e-5,
                 warmup_steps=3000,
@@ -255,11 +363,7 @@ class LitModel(L.LightningModule):
             self.opt = opt
             return opt
         else:
-            # opt = torch.optim.AdamW(
-            #    self.model.parameters(),
-            #    lr=self.learning_rate,
-            #    weight_decay=1e-4,
-            # )
+
             opt = optim.RAdam(
                 self.model.parameters(),
                 lr=self.learning_rate,
@@ -267,21 +371,9 @@ class LitModel(L.LightningModule):
                 betas=(0.95, 0.999),
                 eps=1e-7,
             )
-            # opt = torch.optim.AdamW(
-            #     self.model.parameters(), lr=self.learning_rate, weight_decay=0.00001
-            # )
+
             opt = optim.Lookahead(opt, k=5, alpha=0.5)
-            # scheduler = CyclicCosineDecayLR(
-            #    opt,
-            #    init_decay_epochs=500_000,
-            # min_decay_lr=1e-8,
-            # restart_interval=60_000,
-            # # restart_lr=1e-4,
-            #     warmup_epochs=1000,
-            # warmup_start_lr=1e-5,
-            # restart_interval_multiplier=1.0,
-            # verbose=True,
-            # )
+
             lr_sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 opt, T_0=180_001, T_mult=1, eta_min=1e-7, last_epoch=-1
             )
@@ -307,16 +399,51 @@ def set_seed(seed=42):
     # torch.backends.cudnn.benchmark = False
 
 
-def get_model(cfg_data, cfg_loader, resume_path=None, **kwargs):
+def load_matching_weights(model, checkpoint_path):
+    # Load the state dict from the checkpoint
+    checkpoint = torch.load(checkpoint_path)["state_dict"]
+    print(checkpoint.keys())
+    model_dict = model.state_dict()
+
+    # Create a new state dict with only matching keys and shapes
+    new_state_dict = {}
+
+    # Remove model. from the keys
+    checkpoint = {k.replace("model.", ""): v for k, v in checkpoint.items()}
+
+    for k, v in checkpoint.items():
+        if k in model_dict and v.shape == model_dict[k].shape:
+            new_state_dict[k] = v
+        else:
+            print(f"Skipping parameter: {k}")
+
+    # Update the model's state dict
+    model_dict.update(new_state_dict)
+    model.load_state_dict(model_dict)
+
+
+def get_model(cfg_data, cfg_loader, resume_path=None, p_resume_path=None, **kwargs):
+
+    stats_y = load_from_json(cfg_loader.y_stats_path)
+    y_zero_mask = stats_y["y_zero"]
+    y_class_mask = get_classification_mask(y_zero_mask)
+    print(f"Y class mask: {y_class_mask.sum()}/{y_class_mask.shape[0]}")
 
     model = arch.Net(
         cfg_data.num_2d_feat,
         cfg_data.num_vert_feat,
         cfg_data.num_2d_feat_y,
         cfg_data.num_vert_feat_y,
+        y_class=cfg_loader.y_class,
+        y_class_mask=y_class_mask,
     )
 
+    if p_resume_path is not None:
+        print(f"Loading weights from {p_resume_path} that match")
+        load_matching_weights(model, p_resume_path)
+
     if resume_path is not None:
+        print(f"Resuming from {resume_path}")
         lit_model = LitModel.load_from_checkpoint(
             resume_path, model=model, cfg_data=cfg_data, cfg_loader=cfg_loader, **kwargs
         )
@@ -336,12 +463,25 @@ if __name__ == "__main__":
     parser.add_argument("--lr_find", action="store_true")
     parser.add_argument("--no_compile", action="store_true")
     parser.add_argument("--cycle", action="store_true")
+    parser.add_argument("--y_class", action="store_true")
+    parser.add_argument("--val_interval", type=int, default=20_000)
+
+    parser.add_argument(
+        "--p_resume",
+        type=str,
+        default=None,
+        help="Path to resume from, will only load model weights that match",
+    )
     args = parser.parse_args()
+
+    cfg_loader.y_class = args.y_class
+
     lit_model = get_model(
         cfg_data,
         cfg_loader,
         args.resume,
         use_schedulefree=not args.cycle,
+        p_resume_path=args.p_resume,
     )
 
     callbacks = [
@@ -398,7 +538,7 @@ if __name__ == "__main__":
     trainer = L.Trainer(
         max_epochs=1000,
         logger=logger,
-        val_check_interval=20000,
+        val_check_interval=args.val_interval,
         callbacks=callbacks,
         enable_model_summary=True,
         # precision="16-mixed",

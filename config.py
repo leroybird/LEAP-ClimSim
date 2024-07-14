@@ -27,6 +27,9 @@ class LoaderConfig(BaseModel):
     x_tanh: bool = True
     x_mask_thresh: float | None = None
 
+    y_class: bool = True
+
+
 class DataConfig(BaseModel):
     num_vert: int = 60
     num_vert_feat: int = 9

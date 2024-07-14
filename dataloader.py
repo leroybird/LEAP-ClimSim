@@ -1,13 +1,10 @@
-from re import I
+from collections import defaultdict
 import torch
 from pathlib import Path
 import xarray as xr
-import dataloader
 import numpy as np
 import pandas as pd
 import config
-import logging
-import polars as pl
 from torch.utils.data import DataLoader
 import norm
 
@@ -417,24 +414,13 @@ class LeapLoader:
     def __len__(self):
         return len(self.df)
 
-    def get_data(self, idx, key="path"):
+    def get_data(self, idx, key="path", dtype=np.float32):
         row = self.df.iloc[idx]
         if key == "path":
             ds_input, ds_target = self.get_pair(self.root_folder / row[key])
         else:
             ds_input = self.get_input(self.root_folder / row[key])
             ds_target = None
-
-        # # normalization, scaling
-        # if self.normalize:
-        #     ds_input = (ds_input - self.input_mean) / (self.input_max - self.input_min)
-        #     ds_target = ds_target * self.output_scale
-        # else:
-
-        # lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
-        # lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
-        # lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
-        # area = self.grid_info["area_wgt"].values
 
         ds_input = ds_input.drop(["lat", "lon"])
 
@@ -452,55 +438,23 @@ class LeapLoader:
                 "mlvar", sample_dims=["batch"], name="mlo"
             ).values
 
-        if self.add_static:
-            static_data = get_static(self.grid_info)
-            ds_input = np.concatenate([ds_input, static_data], axis=1)
+        if self.y_transform and ds_target is not None:
+            ds_target = self.y_transform(ds_target, x=ds_input)
 
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
-        if self.y_transform and ds_target is not None:
-            ds_target = self.y_transform(ds_target)
 
-        return ds_input, ds_target
+        if not isinstance(ds_input, dict):
+            ds_input = {"x": ds_input}
+        if not isinstance(ds_target, dict):
+            ds_target = {"y": ds_target}
+        # Check the the keys are not the same
+        assert len(set(ds_input.keys()).intersection(set(ds_target.keys()))) == 0
 
-    def get_data_neighbours(self, idx, key="path"):
-        x_all, y_all = self.get_data(idx, key=key)
-        x_nei = x_all[self.neighbours["idxs"].values, :]
-        assert (x_nei[:, 0] == x_all).all()
+        return {**ds_input, **ds_target}
 
-        # Set the ranges between -1 and 1
-        y_dist = self.neighbours["y_distances"].values[..., None] / 1975267.0
-        x_dist = self.neighbours["x_distances"].values[..., None] / 1975267.0
-        dist_norm = self.neighbours["distances"].values[..., None] / 2035.0
-
-        match key:
-            case "path":
-                time_emb = np.zeros_like(dist_norm)
-            case "prev_path":
-                time_emb = -np.ones_like(dist_norm)
-            case "next_path":
-                time_emb = np.ones_like(dist_norm)
-
-        x_nei = np.concatenate(
-            [x_nei, y_dist, x_dist, dist_norm, time_emb], axis=-1
-        ).astype(np.float32)
-        return x_nei, y_all
-
-    def __getitem__(self, idx, dtype=np.float32):
-        x, y = self.get_data(idx)
-        return x, y.astype(dtype)
-
-    # def __getitem__(self, idx):
-
-    #     if self.multi_step:
-    #         x0, _ = self.get_data_neighbours(idx, key="prev_path")
-    #         x1, y = self.get_data_neighbours(idx, key="path")
-    #         x2, _ = self.get_data_neighbours(idx, key="next_path")
-
-    #         # x1 first so x1[:,0] is the target
-    #         return np.concatenate([x1, x0, x2], axis=1), y
-    #     else:
-    #         return self.get_data(idx)
+    def __getitem__(self, idx):
+        return self.get_data(idx)
 
 
 def get_idxs(num, num_workers, seed=42):
@@ -584,20 +538,25 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
         print("Starting generator")
         self.dl_iter = iter(self.dl)
 
-        return self.generator() 
+        return self.generator()
 
     def generator(self):
         while True:
             assert self.dl_iter is not None
-            x, y = next(self.dl_iter)
-            sample = self.gen.permutation(y.shape[0])
-            sample = sample.reshape(-1, self.batch_size,)
+            batch = next(self.dl_iter)
+            in_bs = list(batch.values())[0].shape[0]
+
+            sample = self.gen.permutation(in_bs)
+            sample = sample.reshape(
+                -1,
+                self.batch_size,
+            )
 
             for i in range(sample.shape[0]):
-                yield [a[sample[i]] for a in x], y[sample[i]]
+                yield {k: v[sample[i]] for k, v in batch.items()}
 
     def __len__(self):
-        return len(self.inner_ds) -  (len(self.inner_ds) % self.batch_size)
+        return len(self.inner_ds) - (len(self.inner_ds) % self.batch_size)
 
     # reset
     def reset(self):
@@ -605,17 +564,13 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
 
 
 def concat_collate(batch):
-    x_all = [[], [], []]
-    y_all = []
-    for (x1, x2, x3), y in batch:
-        x_all[0].append(torch.from_numpy(x1))
-        x_all[1].append(torch.from_numpy(x2))
-        x_all[2].append(torch.from_numpy(x3))
-        y_all.append(torch.from_numpy(y))
+    b_all = defaultdict(list)
 
-    x_all = [torch.cat(x, dim=0) for x in x_all]
-    y_all = torch.cat(y_all, dim=0)
-    return x_all, y_all
+    for b in batch:
+        for k, v in b.items():
+            b_all[k].append(torch.from_numpy(v))
+
+    return {k: torch.cat(v, dim=0) for k, v in b_all.items()}
 
 
 def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
@@ -648,6 +603,7 @@ def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
 
 
 def single_batch_collate(batch):
+    assert len(batch) == 1
     return batch[0]
 
 
@@ -676,12 +632,14 @@ def setup_dataloaders(
 
     train_dl = torch.utils.data.DataLoader(train_ds, **dl_kwargs)
 
-    x, y = next(iter(train_dl))
-    print(f"y.shape: {y.shape} y_std: {y.std()}")
-    for n in range(len(x)):
-        print(
-            f"x[{n}].shape: {x[n].shape} x_std: {x[n].std()} x_max: {x[n].max()} x_min: {x[n].min()}"
-        )
+    batch = next(iter(train_dl))
+    for k, v in batch.items():
+        print(f"{k}: {v.shape}")
+        if v.dtype == torch.float32:
+            print(f"{k} std: {v.std()}")
+
+        print(f"{k} max: {v.max()}")
+        print(f"{k} min: {v.min()}")
 
     if isinstance(train_ds, InnerDataLoader):
         train_ds.reset()

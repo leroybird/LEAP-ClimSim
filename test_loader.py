@@ -18,7 +18,7 @@ cfg_loader = LoaderConfig()
 cfg_data = get_data_config(cfg_loader)
 cfg_data, cfg_loader
 #%%
-df_index = pd.read_parquet('/mnt/ssd/kaggle/index_fwd.parquet')
+df_index = pd.read_parquet('/mnt/ssd/kaggle/index.parquet')
 grid_info_path = '/mnt/storage/kaggle/ClimSim_low-res_grid-info.nc'
 root_folder = Path('/mnt/ssd/kaggle/train')
 weights = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
@@ -38,7 +38,22 @@ train_dl, val_dl = dataloader.setup_dataloaders(loader_cfg=cfg_loader, data_cfg=
 #%%
 batch = next(iter(train_dl))
 #%%
-batch[1].shape
+out = batch['y_cls'].numpy()
+#%%
+y0_amount = (out==0).sum(axis=0).astype(np.float32)/out.shape[0]
+y1_amount = (out==1).sum(axis=0).astype(np.float32)/out.shape[0]
+y2_amount = (out==2).sum(axis=0).astype(np.float32)/out.shape[0]
+y3_amount = (out==3).sum(axis=0).astype(np.float32)/out.shape[0]
+
+
+#%%
+plt.figure(figsize=(12, 12))
+plt.ylim(0, 1)
+plt.plot(y0_amount, label='0')
+plt.plot(y1_amount, label='1')
+plt.plot(y2_amount, label='2')
+plt.plot(y3_amount, label='3')
+plt.legend()
 #%%
 x = batch[0][0]
 #%%

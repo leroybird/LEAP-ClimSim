@@ -1011,6 +1011,8 @@ class Net(nn.Module):
         frac_idxs=None,
         inc_1d_norm=True,
         sigma_reparam=False,
+        y_class=False,
+        y_class_mask=None,
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
@@ -1018,12 +1020,6 @@ class Net(nn.Module):
         self.inc_1d_norm = inc_1d_norm
 
         num_in_2d = num_in_2d
-
-        # if use_emb:
-        #     self.embedding = nn.Embedding(num_emb, emb_ch)
-        #     num_in_2d += emb_ch
-        # else:
-        #     self.embedding = None
 
         assert num_in_2d == 16
         assert num_3d_in == 9
@@ -1108,20 +1104,6 @@ class Net(nn.Module):
 
         self.final_mult = 16
 
-        # out_3d = num_3d_out * self.final_mult * num_vert
-
-        # self.out_3d = nn.Sequential(Block(dim),
-        #                             nn.Conv1d(dim, num_3d_out*self.final_mult, 1),
-        #                             nn.GELU(),
-        #                             LayerNorm(num_3d_out*self.final_mult, data_format='channels_first'),
-        #                             Rearrange('b c (z h) -> b (c z) h', h=1),)
-
-        # self.out_3d_2 = nn.Sequential(nn.Conv1d(out_3d, out_3d, 2, 2, groups=out_3d),
-        #                                 LayerNorm(out_3d, data_format='channels_first'),
-        #                                 nn.GELU(),
-        #                                 nn.Conv1d(out_3d, num_3d_out*num_vert, 1, groups=num_3d_out),
-        #                                 Rearrange('b c h -> b (c h)', h=1))
-
         self.out_3d = nn.Sequential(
             # block(dim),
             nn.Conv1d(dim, num_3d_out, 1),
@@ -1136,11 +1118,20 @@ class Net(nn.Module):
             nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
         )
 
-        if sigma_reparam:
-            self.blocks = remove_all_normalization_layers(convert_to_sn(self.blocks))
+        if y_class:
+            self.out_class = nn.Sequential(
+                nn.Conv1d(dim, num_3d_out * 4, 1),
+                Rearrange("b (c i) z -> b (c z) i", i=4, z=num_vert),
+            )
+            self.out_ratio = nn.Sequential(
+                nn.Conv1d(dim, num_3d_out, 1), Rearrange("b c z -> b (c z)")
+            )
 
-    def forward(self, x):
-        x_point, x_1d, x_1d_re = x
+            self.y_class_mask = y_class_mask
+            self.y_class = y_class
+
+    def forward(self, batch):
+        x_point, x_1d, x_1d_re = batch["x_p"], batch["x_1d"], batch["x_1d_re"]
 
         xp_1d = self.layer_proj_1d(x_point[..., None])
         x_1d = self.layer_re_1d(x_1d)
@@ -1155,15 +1146,21 @@ class Net(nn.Module):
 
         out_3d = self.out_3d(x_out)
 
-        # x_3d_rep = x_3d[:, :, None].repeat(1, self.final_mult, 1)
-        # out_3d = self.out_3d_2(torch.cat([x_3d_rep, out_3d], dim=-1))
-
-        if self.frac_idxs is not None:
-            s, e = self.frac_idxs
-
-            out_frac = out_3d[:, s:e] * x_1d[:, s:e]
-            out_3d[:, s:e] = out_frac
-
         out_2d = self.out_2d(x_out)
 
-        return torch.cat([out_3d, out_2d], dim=1)
+        out = {"reg": torch.cat([out_3d, out_2d], dim=1)}
+
+        if self.y_class:
+            out_r = self.out_ratio(x_out)
+            out_r = out_r[:, self.y_class_mask[0:360]]
+            out_r = F.tanh(out_r)
+            out["ratio"] = out_r
+
+            out_c = self.out_class(x_out)
+            out_c = out_c[:, self.y_class_mask[0:360], :]
+            out_soft = F.softmax(out_c, dim=-1)
+
+            out["logits"] = out_c
+            out["cls_soft"] = out_soft
+
+        return out

@@ -27,12 +27,7 @@ def load_from_json(fname):
 
 class Norm2:
     def __init__(
-        self,
-        stds,
-        means,
-        tanh_mults=None,
-        zero_mask=None,
-        ndim=1,
+        self, stds, means, tanh_mults=None, zero_mask=None, ndim=1, dict_key=None
     ):
         def add_dims(arr, ndim):
             for _ in range(ndim):
@@ -54,7 +49,9 @@ class Norm2:
         if self.use_tanh:
             self.tanh_mults = add_dims(tanh_mults, ndim)
 
-    def __call__(self, data):
+        self.dict_key = dict_key
+
+    def __call__(self, data, x=None):
         out = (data - self.means) / self.stds
         if self.zero_mask is not None:
             out[:, self.zero_mask] = 0
@@ -62,7 +59,11 @@ class Norm2:
         if self.use_tanh:
             out = np.tanh(out * self.tanh_mults)
 
-        return out.astype(np.float32)
+        out = out.astype(np.float32)
+        if self.dict_key is not None:
+            return {self.dict_key: out}
+        else:
+            return out
 
     def denorm(self, data):
         data = data.astype(np.float64)
@@ -78,50 +79,6 @@ class Norm2:
         if self.zero_mask is not None:
             out[:, self.zero_mask] = 0  # self.means[:, self.zero_mask]
 
-        return out
-
-
-class Norm:
-    def __init__(
-        self, fname=None, stds=None, means=None, zero_mask=None, dataset=None, eps=1e-14
-    ):
-        if dataset is not None:
-            self.means, self.stds = np.mean(dataset, axis=0), np.std(dataset, axis=0)
-            with open(fname, "w") as f:
-                f.write(
-                    json.dumps({"means": self.means.tolist(), "stds": self.stds.tolist()})
-                )
-        elif means is not None and stds is not None:
-            self.stds = stds.copy()
-            self.means = means.copy()
-        else:
-            with open(fname) as f:
-                stats_dict = json.loads(f.read())
-
-            self.means = np.asarray(stats_dict["means"])
-            self.stds = np.asarray(stats_dict["stds"])
-
-        self.means = self.means[None, :]
-        self.stds = self.stds[None, :]
-
-        self.zero_mask = self.stds[0] <= eps if zero_mask is None else zero_mask
-
-        self.stds[:, self.zero_mask] = 1.0
-
-        self.eps = eps
-        # self.df = pd.DataFrame({'col' : names, 'std' : self.stds, 'mean' : self.means})
-
-    def __call__(self, data):
-        out = (data - self.means) / self.stds
-        out[:, self.zero_mask] = 0
-
-        return out.astype(np.float32)
-
-    def denorm(self, data):
-        data = data.astype(np.float64)
-        out = data * self.stds + self.means
-
-        out[:, self.zero_mask] = 0  # self.means[:, self.zero_mask]
         return out
 
 
@@ -142,18 +99,100 @@ class NormSplitCmb:
 
         x_1d_re = self.norm_1dx(x_1d_re)
 
-        return x_p, x_1d, x_1d_re
+        return {
+            "x_p": x_p.astype(np.float32),
+            "x_1d": x_1d.astype(np.float32),
+            "x_1d_re": x_1d_re.astype(np.float32),
+        }
+
+    def denorm(self, data):
+        return self.norm_x.denorm(data)
+
+
+def get_classification_mask(y_zero_mask):
+    y_zero_mask = ~y_zero_mask.copy().squeeze()
+    y_zero_mask[0 : 60 * 2] = False
+    y_zero_mask[60 * 4 :] = False
+    return y_zero_mask
+
+
+def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
+    x_data = x_raw[:, 0 : y_raw.shape[1]][:, mask].copy()
+    y_data = y_raw[:, mask].copy()
+    y_std = y_std[mask]
+
+    ratio = (1200 * y_data) / (x_data + 1e-99)
+    x_data_z = x_data <= 1e-99
+    ratio[x_data_z] = 0
+
+    assert ratio.min() >= -1 - 1e-6
+
+    out = np.zeros_like(ratio, dtype=np.int64)
+    out_ratios = np.zeros_like(ratio, dtype=np.float32)
+
+    thresh_r = 1 - thresh
+
+    assert (x_data >= 0).all()
+    non_zeros = np.abs(y_data) >= y_std * thresh
+
+    mask_one = ratio < -thresh_r
+    mask_two = (ratio >= -thresh_r) & (ratio <= thresh_r)
+
+    mask_there = ratio > thresh_r
+
+    assert not (mask_one & mask_two).any()
+    assert not (mask_one & mask_there).any()
+    assert not (mask_two & mask_there).any()
+    mask_one[~non_zeros] = False
+    mask_two[~non_zeros] = False
+    mask_there[~non_zeros] = False
+
+    out[mask_one] = 1
+    out[mask_two] = 2
+    out[mask_there] = 3
+
+    out_ratios[mask_two] = ratio[mask_two]
+    assert out_ratios.min() >= -thresh_r
+    assert out_ratios.max() <= thresh_r
+
+    return out, out_ratios
+
+
+class ClassWrapper:
+    def __init__(self, y_norm: Norm2, class_mask, thresh=0.01):
+        self.y_norm = y_norm
+        self.class_mask = class_mask
+        self.thresh = thresh
+
+    def __call__(self, y, x=None):
+        assert x is not None
+
+        y_norm = self.y_norm(y)["y"]
+        y_cls, y_ratios = get_classification_ratio_labels(
+            x, y, self.class_mask, self.y_norm.stds.squeeze(), self.thresh
+        )
+
+        return {
+            "y": y_norm.astype(np.float32),
+            "y_cls": y_cls,
+            "y_ratios": y_ratios.astype(np.float32),
+            "y_raw": y,
+            "x_raw": x,
+        }
+
+    def denorm(self, data):
+        return self.y_norm.denorm(data)
 
 
 def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     # Y stds are the weights
-    #weights = pd.read_csv(loader_cfg.weights_path, nrows=1)
-    #weights = weights.iloc[0, 1:].values.astype(np.float32)
+    # weights = pd.read_csv(loader_cfg.weights_path, nrows=1)
+    # weights = weights.iloc[0, 1:].values.astype(np.float32)
 
     # Use the weightings as y_std
-    #std_weights = 1.0 / (weights)
-    #std_weights[weights == 0] = 0
-    #assert np.isfinite(std_weights).all()
+    # std_weights = 1.0 / (weights)
+    # std_weights[weights == 0] = 0
+    # assert np.isfinite(std_weights).all()
 
     stats_x = load_from_json(loader_cfg.x_stats_path)
     if loader_cfg.x_tanh:
@@ -162,10 +201,9 @@ def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     else:
         print("Disabling tanh")
         tanh_mults = None
-    
 
     if loader_cfg.x_mask_thresh:
-        x_mask = stats_x['x_range'] > loader_cfg.x_mask_thresh
+        x_mask = stats_x["x_range"] > loader_cfg.x_mask_thresh
         assert data_cfg.x_names is not None
         for n, name in enumerate(data_cfg.x_names):
             if name.startswith("state_q0001") and int(name.split("_")[-1]) <= 10:
@@ -178,32 +216,35 @@ def get_stats(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
         print(f"Masking {x_mask.sum()} features")
         print(f"Masked features: {np.array(data_cfg.x_names)[x_mask]}")
 
-
     else:
         x_mask = None
 
-    norm_x = Norm2(stds=stats_x["stds"], means=stats_x["means"], tanh_mults=tanh_mults,
-                   zero_mask=x_mask)
+    norm_x = Norm2(
+        stds=stats_x["stds"],
+        means=stats_x["means"],
+        tanh_mults=tanh_mults,
+        zero_mask=x_mask,
+    )
     # norm_x = Norm(fname=loader_cfg.x_stats_path, eps=1e-7)
     # Set means to zero for q vars so we can predict a multiplier
     # norm_x.means[:, data_cfg.fac_idxs[0] : data_cfg.fac_idxs[1]] = 0.0
 
-    norm_1dx = Norm2(stds=stats_x["x1d_std"], means=stats_x["x1d_mean"], ndim=2)    
+    norm_1dx = Norm2(stds=stats_x["x1d_std"], means=stats_x["x1d_mean"], ndim=2)
     norm_x_cmb = NormSplitCmb(norm_x, norm_1dx, data_cfg)
 
     stats_y = load_from_json(loader_cfg.y_stats_path)
 
     std_weights = stats_y["stds"]
     y_means = stats_y["means"]
-    y_zero_mask = stats_y['y_zero']
-    
-    norm_y = Norm2(stds=std_weights, means=y_means, zero_mask=y_zero_mask)
-    
+    y_zero_mask = stats_y["y_zero"]
+
+    norm_y = Norm2(stds=std_weights, means=y_means, zero_mask=y_zero_mask, dict_key="y")
+    if loader_cfg.y_class:
+        y_class_mask = get_classification_mask(y_zero_mask)
+        norm_y = ClassWrapper(norm_y, y_class_mask)
+
+        print(f"Classification mask: {y_class_mask.sum()} of {len(y_class_mask)}")
+
     print(f"Zero mask: {y_zero_mask.sum()} of {len(y_zero_mask)}")
-
-
-    # This variable still seems to have norm issues.
-    #indxs = [data_cfg.y_names.index(a) for a in ["ptend_q0002_26", "ptend_q0002_25"]]
-    #norm_y.zero_mask[indxs] = True
 
     return norm_x_cmb, norm_y
