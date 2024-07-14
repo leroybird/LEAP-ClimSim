@@ -52,7 +52,7 @@ class ModelConfig(BaseModel):
 
     use_simple_rmsnorm: bool = True
     rotary_pos_emb: bool = True
-    attn_num_mem_kv: int = 16
+    attn_num_mem_kv: int | None = 16
 
     ff_swish: bool = False
     ff_glu: bool = False
@@ -63,11 +63,12 @@ class ModelConfig(BaseModel):
     ff_relu_squared: bool = False
     ff_dropout: float = 0.0
 
-    pre_norm : bool = True
-    sandwich_norm : bool = False
-    
-    inc_1d_norm : bool = True
-    
+    pre_norm: bool = True
+    sandwich_norm: bool = False
+
+    inc_1d_norm: bool = True
+
+
 def get_data_config(loader_cfg: LoaderConfig):
     pl.Config(tbl_cols=-1)
     train_df = pl.read_parquet(loader_cfg.train_kaggle_path, n_rows=1)

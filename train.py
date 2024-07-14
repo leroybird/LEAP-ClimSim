@@ -138,14 +138,11 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         targ = targ_batch["y"].detach().cpu().numpy()
 
         raw_reg = pred_batch["reg"].detach().cpu().numpy().copy()
-        raw_reg_sub = raw_reg[:, mask_class_cols].copy()
 
         def get_resi(pred, mask):
-            # r = raw_reg.copy()
-            # r[:, mask_class_cols] = pred
-            # r = y_norm.y_norm(r)["y"]
-
-            return targ - pred
+            r = raw_reg.copy()
+            r[:, mask_class_cols][mask] = pred[:, mask_class_cols][mask]
+            return targ - r
 
         y_raw = targ_batch["y_raw"].detach().cpu().numpy()
         x_raw = targ_batch["x_raw"].detach().cpu().numpy()[:, 0 : y_raw.shape[1]]
@@ -161,13 +158,15 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         mask_zero = y_class == 0
         mask_one = y_class == 1
 
-        raw_out = np.zeros_like(raw_reg)
-        raw_out[:, mask_class_cols][mask_zero] = 0
-        output["resi_zero"] = get_resi(raw_out, mask_zero)
+        if mask_zero.sum() > 0:
+            output["base"] = get_resi(raw_reg, mask_zero)
 
-        raw_out = np.zeros_like(raw_reg)
-        raw_out[:, mask_class_cols][mask_one] = -x_raw[mask_one] / 1200
-        output["resi_neg"] = get_resi(raw_out, mask_one)
+        if mask_one.sum() > 0:
+            raw_out = np.zeros_like(raw_reg)
+            raw_out[:, mask_class_cols][mask_one] = -x_raw[mask_one] / 1200
+            raw_out = y_norm.y_norm(raw_out)["y"]
+
+            output["resi_neg"] = get_resi(raw_out, mask_one)
 
     return output
 
@@ -229,7 +228,7 @@ class LitModel(L.LightningModule):
                 mse_point,
             ]
 
-        self.learning_rate = 5e-4
+        self.learning_rate = 1e-3
         self.scheduler_steps = 200_000
         self.use_schedulefree = use_schedulefree
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)

@@ -1090,8 +1090,8 @@ class Net(nn.Module):
         self.y_class = y_class
         if y_class:
             self.out_class = nn.Sequential(
-                nn.Conv1d(dim, num_3d_out * 4, 1),
-                Rearrange("b (c i) z -> b (c z) i", i=4, z=num_vert),
+                nn.Conv1d(dim, num_3d_out * 3, 1),
+                Rearrange("b (c i) z -> b (c z) i", i=3, z=num_vert),
             )
 
             self.y_class_mask = y_class_mask
