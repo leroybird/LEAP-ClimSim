@@ -12,6 +12,7 @@ import torch.distributed
 import wandb
 import fastai.vision.all as fv
 import torch.nn as nn
+import yaml
 
 import config
 import arch
@@ -144,6 +145,9 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
             r[:, mask_class_cols][mask] = pred[:, mask_class_cols][mask]
             return targ - r
 
+        def get_diff(pred, mask):
+            return raw_reg[:, mask_class_cols][mask] - pred[:, mask_class_cols][mask]
+
         y_raw = targ_batch["y_raw"].detach().cpu().numpy()
         x_raw = targ_batch["x_raw"].detach().cpu().numpy()[:, 0 : y_raw.shape[1]]
 
@@ -164,9 +168,11 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         if mask_one.sum() > 0:
             raw_out = np.zeros_like(raw_reg)
             raw_out[:, mask_class_cols][mask_one] = -x_raw[mask_one] / 1200
+            assert not (raw_out == 0).all()
             raw_out = y_norm.y_norm(raw_out)["y"]
 
             output["resi_neg"] = get_resi(raw_out, mask_one)
+            output["diff_neg"] = get_diff(raw_out, mask_one)
 
     return output
 
@@ -361,7 +367,7 @@ class LitModel(L.LightningModule):
             opt = optim.Lookahead(opt, k=5, alpha=0.5)
 
             lr_sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                opt, T_0=180_001, T_mult=1, eta_min=1e-7, last_epoch=-1
+                opt, T_0=80_000, T_mult=1, eta_min=1e-7, last_epoch=-1
             )
 
             lr_scheduler = {
@@ -410,11 +416,19 @@ def load_matching_weights(model, checkpoint_path):
 def get_model(
     cfg_data,
     cfg_loader,
-    model_cfg: config.ModelConfig,
+    model_cfg: config.ModelConfig | None = None,
+    model_cfg_path=None,
     resume_path=None,
     p_resume_path=None,
     **kwargs,
 ):
+
+    if model_cfg_path is not None:
+        model_cfg_path = Path(model_cfg_path)
+        model_cfg_dict = yaml.safe_load(model_cfg_path.read_text())
+        model_cfg = config.ModelConfig(**model_cfg_dict)
+    elif model_cfg is None:
+        model_cfg = config.ModelConfig()
 
     stats_y = load_from_json(cfg_loader.y_stats_path)
     y_zero_mask = stats_y["y_zero"]
@@ -474,8 +488,8 @@ if __name__ == "__main__":
     lit_model = get_model(
         cfg_data,
         cfg_loader,
-        model_cfg,
-        args.resume,
+        model_cfg=model_cfg,
+        resume_path=args.resume,
         use_schedulefree=not args.cycle,
         p_resume_path=args.p_resume,
     )
@@ -500,11 +514,12 @@ if __name__ == "__main__":
             print(f"Saving checkpoints to {output_path}")
             # Save every 10k steps
             checkpoint_callback = ModelCheckpoint(
-                monitor=None,
+                monitor="val_loss",
                 dirpath=output_path,
-                filename="model-{step:08d}",
-                every_n_train_steps=40_000,
+                filename="model-{step:08d}-{val_loss:.4f}",
+                every_n_train_steps=20_000,
                 save_weights_only=True,
+                save_top_k=20,
             )
             callbacks.append(
                 L.pytorch.callbacks.LearningRateMonitor(logging_interval="step")

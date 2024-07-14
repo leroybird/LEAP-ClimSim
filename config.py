@@ -27,7 +27,7 @@ class LoaderConfig(BaseModel):
     x_tanh: bool = True
     x_mask_thresh: float | None = None
 
-    y_class: bool = True
+    y_class: bool = False
 
 
 class DataConfig(BaseModel):
