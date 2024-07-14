@@ -137,13 +137,15 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         mask_class_cols = y_norm.class_mask.squeeze()
 
         targ = targ_batch["y"].detach().cpu().numpy()
-
+        targ_sub = targ[:, mask_class_cols]
+        
         raw_reg = pred_batch["reg"].detach().cpu().numpy().copy()
+        raw_reg_sub = raw_reg[:, mask_class_cols]
 
         def get_resi(pred, mask):
-            r = raw_reg.copy()
-            r[:, mask_class_cols][mask] = pred[:, mask_class_cols][mask]
-            return targ - r
+            r = raw_reg_sub.copy()
+            r[mask] = pred[mask]
+            return targ_sub - r
 
         def get_diff(pred, mask):
             return raw_reg[:, mask_class_cols][mask] - pred[:, mask_class_cols][mask]
@@ -163,16 +165,17 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         mask_one = y_class == 1
 
         if mask_zero.sum() > 0:
-            output["base"] = get_resi(raw_reg, mask_zero)
+            output["base"] = get_resi(raw_reg_sub, mask_zero)
 
         if mask_one.sum() > 0:
-            raw_out = np.zeros_like(raw_reg)
-            raw_out[:, mask_class_cols][mask_one] = -x_raw[mask_one] / 1200
+            raw_out = np.zeros_like(raw_reg_sub)
+            raw_out[mask_one] = -x_raw[mask_one] / 1200
             assert not (raw_out == 0).all()
-            raw_out = y_norm.y_norm(raw_out)["y"]
+            raw_out = y_norm.y_norm.stds.squeeze()[mask_class_cols] * raw_out
+            raw_out += y_norm.y_norm.means.squeeze()[mask_class_cols]
 
             output["resi_neg"] = get_resi(raw_out, mask_one)
-            output["diff_neg"] = get_diff(raw_out, mask_one)
+            #output["diff_neg"] = get_diff(raw_out, mask_one)
 
     return output
 
@@ -277,6 +280,7 @@ class LitModel(L.LightningModule):
                         on_step=step_name == "train",
                         on_epoch=step_name == "val",
                     )
+            else:
                 self.log(
                     f"{step_name}_loss",
                     loss.item(),
