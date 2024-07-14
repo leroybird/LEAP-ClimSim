@@ -18,6 +18,7 @@ from x_transformers.x_transformers import (
     RotaryEmbedding,
 )
 
+from config import ModelConfig
 
 from sigma_reparam import remove_all_normalization_layers, convert_to_sn
 
@@ -1004,21 +1005,19 @@ class Net(nn.Module):
         num_3d_in,
         num_2d_out,
         num_3d_out,
-        num_static=0,
-        num_vert=60,
-        dim=256,
-        depth=20,
-        frac_idxs=None,
-        inc_1d_norm=True,
-        sigma_reparam=False,
+        model_config: ModelConfig,
         y_class=False,
         y_class_mask=None,
+        num_vert=60,
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
-        self.num_static = num_static
-        self.inc_1d_norm = inc_1d_norm
 
+        dim = model_config.dim
+        depth = model_config.depth
+        inc_1d_norm = model_config.inc_1d_norm
+
+        self.inc_1d_norm = inc_1d_norm
         num_in_2d = num_in_2d
 
         assert num_in_2d == 16
@@ -1028,7 +1027,6 @@ class Net(nn.Module):
         self.num_2d_out = num_2d_out
         self.num_3d_out = num_3d_out
         self.num_vert = num_vert
-        self.frac_idxs = frac_idxs
 
         mult_fac_2d = 1
         self.layer_proj_1d = nn.Sequential(
@@ -1055,6 +1053,11 @@ class Net(nn.Module):
             kernel_size=1,
         )
 
+        config_dict = model_config.model_dump()
+        head_dim = config_dict.pop("head_dim")
+        del config_dict["inc_1d_norm"]
+        config_dict["heads"] = dim // head_dim
+
         # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
         # self.enc = XEncoder(dim, 5, num_in_2d, num_3d_in, num_vert)
 
@@ -1063,41 +1066,7 @@ class Net(nn.Module):
             Rearrange("b c z -> b z c"),
             # Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
             AttentionLayers(
-                dim=dim,
-                depth=depth,
-                heads=dim // 64,
-                use_simple_rmsnorm=True,
-                rotary_pos_emb=True,
-                attn_num_mem_kv=16,
-                # ff_swish=True,
-                # ff_glu=True,
-                # attn_talking_heads=True,
-                # attn_qk_norm=False,  # set to True
-                attn_flash=True,
-                attn_dropout=0.0,
-                # ff_relu_squared=True,
-                # ff_dropout=.2,
-                # attn_logit_softclamp_value=30,
-                # attn_qk_norm_groups=8,
-                # attn_qk_norm_scale=10,  # new scale on the similarity, with groups of 1
-                # gate_residual=True,
-                # ff_no_bias = True,
-                # attn_gate_values = True,
-                # post_norm=False,
-                # pre_norm=False,
-                # no_pre_or_postnorm=True,
-                # attn_qk_norm=True,
-                # attn_qk_norm_dim_scale=True,
-                pre_norm=True,
-                # sandwich_norm=True,
-                # attn_use_cope=True,
-                # attn_cope_max_pos=16,
-                # attn_cope_soft_onehot_pos=False,  #
-                # in the paper, residual attention had best results with post-layernorm
-                # residual_attn = True,    # add residual attention
-                # qk_norm_dim_scale=True,  # Cosine
-                # macaron = True # Two FFs
-                # sandwich_coef = 6  # interleave attention and feedforwards with sandwich coefficient of 6
+                **config_dict
             ),
             Rearrange("b z c -> b c z"),
         )
