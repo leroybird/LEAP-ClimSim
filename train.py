@@ -98,38 +98,35 @@ def mse_point(pred, tar):
 
 
 class RegRatioClassLoss(nn.Module):
-    def __init__(self, w_class=1.0, w_reg=1.0, w_ratio=1.0):
+    def __init__(
+        self,
+        w_class=1.0,
+        w_reg=1.0,
+    ):
         super().__init__()
         self.reg_loss = nn.HuberLoss(delta=2.0, reduction="none")
         self.class_loss = nn.CrossEntropyLoss(reduction="none")
-        self.ratio_loss = nn.L1Loss(reduction="none")
 
         self.w_class = w_class
         self.w_reg = w_reg
-        self.w_ratio = w_ratio
 
     def forward(self, pred: dict, batch: dict):
         reg_loss = self.reg_loss(pred["reg"], batch["y"])
 
         logit_class = pred["logits"]
+
         logit_class = rearrange(logit_class, "b c i -> (b c) i")
         target_class = rearrange(batch["y_cls"], "b c -> (b c)")
+
         class_loss = self.class_loss(logit_class, target_class)
 
-        ratio_loss = self.ratio_loss(pred["ratio"], batch["y_ratios"])
-
-        total = (
-            class_loss.mean() * self.w_class
-            + reg_loss.mean() * self.w_reg
-            + ratio_loss.mean() * self.w_ratio
-        )
+        total = class_loss.mean() * self.w_class + reg_loss.mean() * self.w_reg
 
         total = torch.mean(total)
         return {
             "loss": total,
             "class_loss": torch.mean(class_loss),
             "reg_loss": torch.mean(reg_loss),
-            "ratio_loss": torch.mean(ratio_loss),
             "class_acc": (logit_class.argmax(dim=-1) == target_class).float().mean(),
         }
 
@@ -142,16 +139,14 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
         targ = targ_batch["y"].detach().cpu().numpy()
 
         raw_reg = pred_batch["reg"].detach().cpu().numpy().copy()
-        raw_reg = y_norm.denorm(raw_reg)
-
         raw_reg_sub = raw_reg[:, mask_class_cols].copy()
 
-        def get_resi(pred):
-            r = raw_reg.copy()
-            r[:, mask_class_cols] = pred
-            r = y_norm.y_norm(r)["y"]
+        def get_resi(pred, mask):
+            # r = raw_reg.copy()
+            # r[:, mask_class_cols] = pred
+            # r = y_norm.y_norm(r)["y"]
 
-            return r - targ
+            return targ - pred
 
         y_raw = targ_batch["y_raw"].detach().cpu().numpy()
         x_raw = targ_batch["x_raw"].detach().cpu().numpy()[:, 0 : y_raw.shape[1]]
@@ -166,20 +161,14 @@ def correct_preds_cls(pred_batch: dict, targ_batch, y_norm):
 
         mask_zero = y_class == 0
         mask_one = y_class == 1
-        mask_two = y_class == 2
-        mask_three = y_class == 3
 
-        output["resi_base"] = get_resi(raw_reg_sub)
-        raw_reg_sub[mask_zero] = 0
-        output["resi_zero"] = get_resi(raw_reg_sub)
+        raw_out = np.zeros_like(raw_reg)
+        raw_out[:, mask_class_cols][mask_zero] = 0
+        output["resi_zero"] = get_resi(raw_out, mask_zero)
 
-        raw_reg_sub[mask_one] = -x_raw[mask_one] / 1200
-        output["resi_one"] = get_resi(raw_reg_sub)
-
-        raw_reg_sub[mask_two] = (
-            pred_batch["ratio"][mask_two].detach().cpu().numpy() * x_raw[mask_two]
-        )
-        output["resi_two"] = get_resi(raw_reg_sub)
+        raw_out = np.zeros_like(raw_reg)
+        raw_out[:, mask_class_cols][mask_one] = -x_raw[mask_one] / 1200
+        output["resi_neg"] = get_resi(raw_out, mask_one)
 
     return output
 
@@ -267,9 +256,7 @@ class LitModel(L.LightningModule):
             loss = self.loss_func(pred[:, self.mask], y[:, self.mask])
 
         if step_name == "val":
-            self.residuals["val_r2"].append(
-                (pred[:, self.mask] - y[:, self.mask]).detach().cpu()
-            )
+            self.residuals["r2"].append((y - pred).detach().cpu().numpy())
 
             if self.y_class:
                 correct_preds = correct_preds_cls(pred_batch, batch, self.y_norm)
@@ -286,7 +273,6 @@ class LitModel(L.LightningModule):
                         on_step=step_name == "train",
                         on_epoch=step_name == "val",
                     )
-            else:
                 self.log(
                     f"{step_name}_loss",
                     loss.item(),
@@ -320,10 +306,12 @@ class LitModel(L.LightningModule):
 
         for key, val in self.residuals.items():
             residuals = np.concatenate(val, axis=0)
-            r2 = 1 - np.mean(residuals**2) / 0.886
-            self.log(f"val_{key}", r2, prog_bar=True, on_epoch=True)
+            r2 = 1 - (np.mean(residuals**2) / 0.886)
+
+            self.log(f"val_{key}_r2", r2, prog_bar=True, on_epoch=True)
+
             mse = np.mean(residuals**2)
-            self.log(f"val_{key}", mse, prog_bar=True, on_epoch=True)
+            self.log(f"val_{key}_mse", mse, prog_bar=True, on_epoch=True)
 
         self.residuals = defaultdict(list)
 
@@ -402,7 +390,6 @@ def set_seed(seed=42):
 def load_matching_weights(model, checkpoint_path):
     # Load the state dict from the checkpoint
     checkpoint = torch.load(checkpoint_path)["state_dict"]
-    print(checkpoint.keys())
     model_dict = model.state_dict()
 
     # Create a new state dict with only matching keys and shapes
@@ -517,9 +504,9 @@ if __name__ == "__main__":
         else:
             # Add save model callback
             checkpoint_callback = ModelCheckpoint(
-                monitor="val_mse",
+                monitor="val_loss",
                 dirpath="checkpoints/",
-                filename=f"{run_name}" + "-{step:06d}-{val_mse:.3f}",
+                filename=f"{run_name}" + "-{step:06d}-{val_loss:.4f}",
                 save_top_k=3,
                 mode="min",
                 verbose=True,
