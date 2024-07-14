@@ -1118,17 +1118,14 @@ class Net(nn.Module):
             nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
         )
 
+        self.y_class = y_class
         if y_class:
             self.out_class = nn.Sequential(
                 nn.Conv1d(dim, num_3d_out * 4, 1),
                 Rearrange("b (c i) z -> b (c z) i", i=4, z=num_vert),
             )
-            self.out_ratio = nn.Sequential(
-                nn.Conv1d(dim, num_3d_out, 1), Rearrange("b c z -> b (c z)")
-            )
 
             self.y_class_mask = y_class_mask
-            self.y_class = y_class
 
     def forward(self, batch):
         x_point, x_1d, x_1d_re = batch["x_p"], batch["x_1d"], batch["x_1d_re"]
@@ -1151,16 +1148,11 @@ class Net(nn.Module):
         out = {"reg": torch.cat([out_3d, out_2d], dim=1)}
 
         if self.y_class:
-            out_r = self.out_ratio(x_out)
-            out_r = out_r[:, self.y_class_mask[0:360]]
-            out_r = F.tanh(out_r)
-            out["ratio"] = out_r
-
             out_c = self.out_class(x_out)
             out_c = out_c[:, self.y_class_mask[0:360], :]
-            out_soft = F.softmax(out_c, dim=-1)
-
             out["logits"] = out_c
+            
+            out_soft = F.softmax(out_c, dim=-1)
             out["cls_soft"] = out_soft
 
         return out

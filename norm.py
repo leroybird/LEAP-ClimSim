@@ -116,7 +116,7 @@ def get_classification_mask(y_zero_mask):
     return y_zero_mask
 
 
-def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
+def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.005):
     x_data = x_raw[:, 0 : y_raw.shape[1]][:, mask].copy()
     y_data = y_raw[:, mask].copy()
     y_std = y_std[mask]
@@ -127,39 +127,29 @@ def get_classification_ratio_labels(x_raw, y_raw, mask, y_std, thresh=0.01):
 
     assert ratio.min() >= -1 - 1e-6
 
-    out = np.zeros_like(ratio, dtype=np.int64)
-    out_ratios = np.zeros_like(ratio, dtype=np.float32)
-
-    thresh_r = 1 - thresh
+    out = np.zeros_like(ratio, dtype=np.int64) - 1
+    thresh_r = 1.0 - thresh
 
     assert (x_data >= 0).all()
     non_zeros = np.abs(y_data) >= y_std * thresh
 
-    mask_one = ratio < -thresh_r
-    mask_two = (ratio >= -thresh_r) & (ratio <= thresh_r)
+    mask_one = non_zeros & (ratio <= -thresh_r)
+    mask_two = non_zeros & (~mask_one)
 
-    mask_there = ratio > thresh_r
-
-    assert not (mask_one & mask_two).any()
-    assert not (mask_one & mask_there).any()
-    assert not (mask_two & mask_there).any()
-    mask_one[~non_zeros] = False
-    mask_two[~non_zeros] = False
-    mask_there[~non_zeros] = False
-
+    out[~non_zeros] = 0
     out[mask_one] = 1
     out[mask_two] = 2
-    out[mask_there] = 3
 
-    out_ratios[mask_two] = ratio[mask_two]
-    assert out_ratios.min() >= -thresh_r
-    assert out_ratios.max() <= thresh_r
+    assert not ((~non_zeros) & mask_one & mask_two).any()
 
-    return out, out_ratios
+    assert out.max() <= 2
+    assert out.min() >= 0
+
+    return out
 
 
 class ClassWrapper:
-    def __init__(self, y_norm: Norm2, class_mask, thresh=0.01):
+    def __init__(self, y_norm: Norm2, class_mask, thresh=0.005):
         self.y_norm = y_norm
         self.class_mask = class_mask
         self.thresh = thresh
@@ -168,14 +158,13 @@ class ClassWrapper:
         assert x is not None
 
         y_norm = self.y_norm(y)["y"]
-        y_cls, y_ratios = get_classification_ratio_labels(
+        y_cls = get_classification_ratio_labels(
             x, y, self.class_mask, self.y_norm.stds.squeeze(), self.thresh
         )
 
         return {
             "y": y_norm.astype(np.float32),
             "y_cls": y_cls,
-            "y_ratios": y_ratios.astype(np.float32),
             "y_raw": y,
             "x_raw": x,
         }

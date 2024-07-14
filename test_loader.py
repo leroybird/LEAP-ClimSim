@@ -36,6 +36,8 @@ assert len(df_index) == len(df_index_tr) + len(df_index_val)
 #%%
 train_dl, val_dl = dataloader.setup_dataloaders(loader_cfg=cfg_loader, data_cfg=cfg_data)
 #%%
+class_mask = train_dl.dataset.inner_ds.y_transform.class_mask
+#%%
 batch = next(iter(train_dl))
 #%%
 out = batch['y_cls'].numpy()
@@ -55,7 +57,34 @@ plt.plot(y2_amount, label='2')
 plt.plot(y3_amount, label='3')
 plt.legend()
 #%%
-x = batch[0][0]
+y_norm = batch['y'][:, class_mask]
+y_total = (y_norm**2).sum(axis=0)
+#%%
+data_all = []
+for n in range(y_norm.shape[1]):
+    print(n)
+    s_tot = y_norm[:, n]**2
+    s_0 = y_norm[out[:, n]==0, n]**2
+    s_1 = y_norm[out[:, n]==1, n]**2
+    s_2 = y_norm[out[:, n]==2, n]**2
+    s_3 = y_norm[out[:, n]==3, n]**2
+    
+    data_all.append([s_0.sum()/s_tot.sum(), s_1.sum()/s_tot.sum(), s_2.sum()/s_tot.sum(), s_3.sum()/s_tot.sum()])
+
+
+#%%
+plt.plot(data_all, label=['0', '1', '2', '3'])
+plt.legend()
+
+#%%
+plt.scatter(0, (y_norm[out==0]**2).sum(axis=0)/y_total.sum(), label='0')
+plt.scatter(0, (y_norm[out==1]**2).sum(axis=0)/y_total.sum(), label='1')
+plt.scatter(0, (y_norm[out==2]**2).sum(axis=0)/y_total.sum(), label='2')
+plt.scatter(0, (y_norm[out==3]**2).sum(axis=0)/y_total.sum(), label='3')
+plt.legend()
+
+#%%
+(y_norm[out==0]**2).sum(axis=0)/y_total.sum(), (y_norm[out==1]**2).sum(axis=0)/y_total.sum(), (y_norm[out==2]**2).sum(axis=0)/y_total.sum(), (y_norm[out==3]**2).sum(axis=0)/y_total.sum()
 #%%
 batch = next(iter(val_dl))
 
