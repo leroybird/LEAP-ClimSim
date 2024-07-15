@@ -180,9 +180,24 @@ for i, w in enumerate(norm_y.zero_mask):
 #%%
 # Add average preds 
 preds_gbm = np.stack(preds_model, axis=1)
-preds_gbm_final = preds_gbm + all_val_av
 # %%
+test_av = np.stack(all_test, axis=0).mean(axis=0)
+preds_final = preds_gbm + test_av
+#%%
+torch.save(preds_final, "sub.pt")
+#%%
 import matplotlib.pyplot as plt
+plt.plot(r2_base_lst)
+plt.plot(r2_gb_lst)
+#%%
+np.mean(r2_base_lst)
+#%%
+np.mean(r2_gb_lst)
+#%%
+1 - np.mean(r2_gb_lst) / 0.886
+#%%
+1 - np.mean(r2_base_lst) / 0.886
+#%%
 
 ratio = -(x_test[:, : len(weighting)] * weighting[None, :]) / 1200
 # r2_ratio = r2_score(y_test[:, i], ratio)

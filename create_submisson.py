@@ -11,23 +11,25 @@ import gc
 
 # %%
 # input_fname = Path("output/output_new_norm_bf.pt")
-input_fname = list(Path("model_preds/").glob("*test.pt"))
-input_fname
+# input_fname = list(Path("model_preds/").glob("*test.pt"))
+# input_fname
+# # %%
+# all_preds = []
+# for fname in input_fname:
+#     all_preds.append(torch.load(fname)["reg"])
+# # %%
+# # Take average
+# preds = np.stack(all_preds).mean(axis=0)
+# # %%
+# del all_preds
+# gc.collect()
+# # %%
+# input_fname = input_fname[0]
 # %%
-all_preds = []
-for fname in input_fname:
-    all_preds.append(torch.load(fname)["reg"])
-# %%
-# Take average
-preds = np.stack(all_preds).mean(axis=0)
-# %%
-del all_preds
-gc.collect()
-# %%
-input_fname = input_fname[0]
-# %%
-# preds = torch.load(input_fname)
-# preds.shape
+input_fname = 'sub.pt'
+
+preds = torch.load(input_fname)
+preds.shape
 # %%
 preds.std(axis=0)
 # %%
@@ -84,41 +86,41 @@ out_df.rename(columns={0: "sample_id"}, inplace=True)
 # %%
 out_df
 # %%
-out_df.to_parquet(
-    input_fname.parent / input_fname.name.replace(".pt", "_base.parquet"), index=False
-)
-# %%
-out_df = pd.read_parquet(
-    input_fname.parent / input_fname.name.replace(".pt", "_base.parquet")
-)
+out_df.to_parquet('sub_v1.parquet', index=False)
+#%%
 
 # %%
-q_start, q_end = 120, 60 * 4
-q_mask = ~diff_mask.copy()
-q_mask[0:q_start] = False
-q_mask[q_end:] = False
-q_mask_pd = np.concatenate([np.zeros(1, dtype=bool), q_mask], axis=0)
-# %%
-q_mask.shape
-# %%
-assert (test_data[:, q_mask] >= 0).all()
-# %%
-smaller_r = out_df.iloc[:, q_mask_pd].values < (-test_data[:, q_mask]) / 1200
-# %%
-av_smaller_r = smaller_r.sum(axis=0) / smaller_r.shape[0]
-plt.plot(av_smaller_r)
-# %%
-out_df_2 = out_df.copy()
-# %%
-for n, idx_q in enumerate(np.where(q_mask_pd)[0]):
-    s_m = smaller_r[:, n]
-    out_df_2.values[s_m, idx_q] = -(test_data[s_m, idx_q - 1]) / 1200
-# %%
-out_df_2.to_parquet(
-    input_fname.parent / input_fname.name.replace(".pt", "_min_ratio.parquet"),
-    index=False,
-)
-# %%
-(out_df == out_df_2).all()
+# out_df = pd.read_parquet(
+#     input_fname.parent / input_fname.name.replace(".pt", "_base.parquet")
+# )
+
+# # %%
+# q_start, q_end = 120, 60 * 4
+# q_mask = ~diff_mask.copy()
+# q_mask[0:q_start] = False
+# q_mask[q_end:] = False
+# q_mask_pd = np.concatenate([np.zeros(1, dtype=bool), q_mask], axis=0)
+# # %%
+# q_mask.shape
+# # %%
+# assert (test_data[:, q_mask] >= 0).all()
+# # %%
+# smaller_r = out_df.iloc[:, q_mask_pd].values < (-test_data[:, q_mask]) / 1200
+# # %%
+# av_smaller_r = smaller_r.sum(axis=0) / smaller_r.shape[0]
+# plt.plot(av_smaller_r)
+# # %%
+# out_df_2 = out_df.copy()
+# # %%
+# for n, idx_q in enumerate(np.where(q_mask_pd)[0]):
+#     s_m = smaller_r[:, n]
+#     out_df_2.values[s_m, idx_q] = -(test_data[s_m, idx_q - 1]) / 1200
+# # %%
+# out_df_2.to_parquet(
+#     input_fname.parent / input_fname.name.replace(".pt", "_min_ratio.parquet"),
+#     index=False,
+# )
+# # %%
+# (out_df == out_df_2).all()
 
 # %%

@@ -541,20 +541,23 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
         return self.generator()
 
     def generator(self):
-        while True:
-            assert self.dl_iter is not None
-            batch = next(self.dl_iter)
-            in_bs = list(batch.values())[0].shape[0]
+        try:
+            while True:
+                assert self.dl_iter is not None
+                batch = next(self.dl_iter)
+                in_bs = list(batch.values())[0].shape[0]
 
-            sample = self.gen.permutation(in_bs)
-            sample = sample.reshape(
-                -1,
-                self.batch_size,
-            )
+                sample = self.gen.permutation(in_bs)
+                sample = sample.reshape(
+                    -1,
+                    self.batch_size,
+                )
 
-            for i in range(sample.shape[0]):
-                yield {k: v[sample[i]] for k, v in batch.items()}
-
+                for i in range(sample.shape[0]):
+                    yield {k: v[sample[i]] for k, v in batch.items()}
+        except StopIteration:
+            pass
+        
     def __len__(self):
         return len(self.inner_ds) - (len(self.inner_ds) % self.batch_size)
 
