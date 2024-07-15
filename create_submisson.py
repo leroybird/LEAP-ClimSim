@@ -26,7 +26,7 @@ import gc
 # # %%
 # input_fname = input_fname[0]
 # %%
-input_fname = 'sub.pt'
+input_fname = 'sub3.pt'
 
 preds = torch.load(input_fname)
 preds.shape
@@ -86,7 +86,7 @@ out_df.rename(columns={0: "sample_id"}, inplace=True)
 # %%
 out_df
 # %%
-out_df.to_parquet('sub_v1.parquet', index=False)
+out_df.to_parquet('sub_v2.parquet', index=False)
 #%%
 
 # %%

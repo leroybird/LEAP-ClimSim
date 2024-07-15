@@ -237,7 +237,7 @@ class LitModel(L.LightningModule):
                 mse_point,
             ]
 
-        self.learning_rate = 1e-3
+        self.learning_rate = 3e-4
         self.scheduler_steps = 200_000
         self.use_schedulefree = use_schedulefree
         self.mask = torch.zeros(360 + 8, dtype=torch.bool)
@@ -371,7 +371,7 @@ class LitModel(L.LightningModule):
             opt = optim.Lookahead(opt, k=5, alpha=0.5)
 
             lr_sched = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                opt, T_0=80_000, T_mult=1, eta_min=1e-7, last_epoch=-1
+                opt, T_0=240_000, T_mult=1, eta_min=1e-7, last_epoch=-1
             )
 
             lr_scheduler = {
@@ -476,6 +476,7 @@ if __name__ == "__main__":
     parser.add_argument("--cycle", action="store_true")
     parser.add_argument("--y_class", action="store_true")
     parser.add_argument("--val_interval", type=int, default=20_000)
+    parser.add_argument("--swa", action="store_true")
 
     parser.add_argument(
         "--p_resume",
@@ -544,11 +545,14 @@ if __name__ == "__main__":
     else:
         logger = None
 
-    # callbacks.append(
-    #     L.pytorch.callbacks.StochasticWeightAveraging(swa_lrs=1e-2,
-    #                               swa_epoch_start=1,
-    #                               annealing_epochs=4,
-    #                               ))
+    # if args.swa is not None:
+    #     callbacks.append(
+    #         L.pytorch.callbacks.StochasticWeightAveraging(
+    #             swa_lrs=1e-2,
+    #             swa_epoch_start=0.00001,
+    #             annealing_epochs=4,
+    #         )
+    #     )
 
     trainer = L.Trainer(
         max_epochs=1000,

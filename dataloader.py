@@ -457,60 +457,53 @@ class LeapLoader:
         return self.get_data(idx)
 
 
-def get_idxs(num, num_workers, seed=42):
+def get_idxs(num, num_workers):
     idxs = np.arange(num)
-    np.random.seed(seed)
     idxs = np.random.permutation(idxs)[0 : num - num % num_workers]
     idxs = np.array_split(idxs, num_workers)
     return idxs
 
 
-# class IterableDataset(torch.utils.data.IterableDataset):
-#     def __init__(self, inner_ds, num_workers=24, seed=42, sample_size=16):
-#         self.num_workers = num_workers
-#         self.total_iterations = -1
-#         self.seed = seed
-#         self.inner_ds = inner_ds
-#         self.num_samples = len(inner_ds)
-#         self.sample_size = sample_size
-#         self.grid_points = 384
-#         assert self.grid_points % self.sample_size == 0
-#         self.inner_rep = self.grid_points // self.sample_size
+class IterableDatasetOld(torch.utils.data.IterableDataset):
+    def __init__(self, inner_ds, num_workers=24, sample_size=16):
+        self.num_workers = num_workers
+        self.total_iterations = -1
+        self.inner_ds = inner_ds
+        self.num_samples = len(inner_ds)
+        self.sample_size = sample_size
+        self.grid_points = 384
+        assert self.grid_points % self.sample_size == 0
+        self.inner_rep = self.grid_points // self.sample_size
 
-#     def gen(
-#         self,
-#     ):
-#         self.total_iterations += 1
-#         worker_info = torch.utils.data.get_worker_info()
+        print("Useing old dataloader!")
 
-#         if worker_info is None:
-#             logging.warning("No worker info")
-#             iter_idx = 0
-#         else:
-#             iter_idx = worker_info.id
+    def gen(
+        self,
+    ):
+        self.total_iterations += 1
+        worker_info = torch.utils.data.get_worker_info()
 
-#         idxs = get_idxs(
-#             len(self.inner_ds), self.num_workers, self.seed + self.total_iterations
-#         )
+        if worker_info is None:
+            print("Worker info is None")
+            iter_idx = 0
+        else:
+            iter_idx = worker_info.id
 
-#         for idx in idxs[iter_idx]:
-#             # Each inner dataset contains 384 unique grid points
-#             ds_x_inner, ds_y_inner = self.inner_ds[idx]
-#             # ds_x_inner = ds_x_inner.values
-#             # ds_y_inner = ds_y_inner.values
+        idxs = get_idxs(len(self.inner_ds), self.num_workers)
 
-#             random_sample = np.random.permutation(self.grid_points)
-#             for n in range(self.inner_rep):
-#                 ds_x = ds_x_inner[
-#                     random_sample[n * self.sample_size : (n + 1) * self.sample_size]
-#                 ]
-#                 ds_y = ds_y_inner[
-#                     random_sample[n * self.sample_size : (n + 1) * self.sample_size]
-#                 ]
-#                 yield ds_x, ds_y
+        for idx in idxs[iter_idx]:
+            # Each inner dataset contains 384 unique grid points
+            batch = self.inner_ds[idx]
+            # ds_x_inner = ds_x_inner.values
+            # ds_y_inner = ds_y_inner.values
 
-#     def __iter__(self):
-#         return self.gen()
+            random_sample = np.random.permutation(self.grid_points)
+            for n in range(self.inner_rep):
+                s = random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+                yield {k: v[s] for k, v in batch.items()}
+
+    def __iter__(self):
+        return self.gen()
 
 
 class InnerDataLoader(torch.utils.data.IterableDataset):
@@ -557,7 +550,7 @@ class InnerDataLoader(torch.utils.data.IterableDataset):
                     yield {k: v[sample[i]] for k, v in batch.items()}
         except StopIteration:
             pass
-        
+
     def __len__(self):
         return len(self.inner_ds) - (len(self.inner_ds) % self.batch_size)
 
@@ -617,16 +610,30 @@ def setup_dataloaders(
     inner_train_ds, valid_ds = get_datasets(loader_cfg, data_cfg)
 
     if loader_cfg.use_iterable_train:
-        train_ds = InnerDataLoader(
-            inner_train_ds, num_workers=12, batch_size=loader_cfg.batch_size
-        )
+        if loader_cfg.use_old_dataloader:
+            train_ds = IterableDatasetOld(
+                inner_ds=inner_train_ds,
+                num_workers=loader_cfg.num_workers,
+                sample_size=16,
+            )
+            dl_kwargs = dict(
+                num_workers=loader_cfg.num_workers,
+                batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+                collate_fn=concat_collate,
+                pin_memory=False,
+            )
+        else:
 
-        dl_kwargs = dict(
-            num_workers=0,
-            batch_size=1,
-            collate_fn=single_batch_collate,
-            pin_memory=False,
-        )
+            train_ds = InnerDataLoader(
+                inner_train_ds, num_workers=12, batch_size=loader_cfg.batch_size
+            )
+
+            dl_kwargs = dict(
+                num_workers=0,
+                batch_size=1,
+                collate_fn=single_batch_collate,
+                pin_memory=False,
+            )
     else:
         train_ds = inner_train_ds
         dl_kwargs = dict(

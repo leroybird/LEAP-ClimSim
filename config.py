@@ -22,12 +22,13 @@ class LoaderConfig(BaseModel):
     use_iterable_train: bool = True
 
     apply_norm: bool = True
-    batch_size: int = 512
+    batch_size: int = 256
 
     x_tanh: bool = True
     x_mask_thresh: float | None = None
 
     y_class: bool = False
+    use_old_dataloader: bool = False
 
 
 class DataConfig(BaseModel):
@@ -59,7 +60,7 @@ class ModelConfig(BaseModel):
 
     attn_talking_heads: bool = False
     attn_flash: bool = True
-    attn_dropout: float = 0.0
+    attn_dropout: float = 0.0  # Changed!
     ff_relu_squared: bool = False
     ff_dropout: float = 0.0
 
