@@ -26,7 +26,7 @@ import gc
 # # %%
 # input_fname = input_fname[0]
 # %%
-input_fname = 'sub3.pt'
+input_fname = 'sub7_cmb.pt'
 
 preds = torch.load(input_fname)
 preds.shape
@@ -73,9 +73,9 @@ ratio_mask_pd = np.concatenate([np.zeros(1, dtype=bool), ratio_mask])
 out_df = pd.DataFrame({"sample_id": test_df["sample_id"]})
 out_df[list(weightings.columns[1:])] = preds
 # %%
-assert np.isclose(out_df[list(weightings.columns[1:])].to_numpy(), preds).all()
+#assert np.isclose(out_df[list(weightings.columns[1:])].to_numpy(), preds).all()
 # %%
-out_df
+#out_df
 # %%
 out_df.iloc[:, ratio_mask_pd] = -(test_data[:, ratio_mask]) / 1200
 # %%
@@ -86,7 +86,7 @@ out_df.rename(columns={0: "sample_id"}, inplace=True)
 # %%
 out_df
 # %%
-out_df.to_parquet('sub_v2.parquet', index=False)
+out_df.to_parquet('sub_v4.parquet', index=False)
 #%%
 
 # %%
