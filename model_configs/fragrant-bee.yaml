@@ -1,0 +1,4 @@
+  ff_swish : True
+  ff_glu: True
+  attn_dropout: 0.1
+  

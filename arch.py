@@ -1,31 +1,30 @@
-from ptwt._stationary_transform import _swt
-from collections import namedtuple
-from rotary_embedding_torch import RotaryEmbedding
+# from rotary_embedding_torch import RotaryEmbedding
 from functools import partial
 import math
-import re
-import numpy as np
 
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange
-import pandas as pd
-from regex import R
 from torchvision.ops import Permute
 import torch.nn.functional as F
-from typing import Callable, Optional, List, final
+from typing import Callable, Optional
 import torch
-from torch import Block, nn, Tensor
+from torch import nn, Tensor
 from torch.nn import functional as F
 
-# from mwt import MWT1d
-# from fastkan import FastKAN
-from torch.nn.attention import SDPBackend
+from x_transformers.x_transformers import (
+    AttentionLayers,
+    Attention,
+    FeedForward,
+    RotaryEmbedding,
+)
 
-# from labml_nn.normalization.deep_norm import DeepNorm
+from config import ModelConfig
+
+from sigma_reparam import remove_all_normalization_layers, convert_to_sn
 
 # Enable TFfloat32
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
+
+torch._dynamo.config.cache_size_limit = 256
 
 
 class SinusoidalPosEmb(nn.Module):
@@ -109,7 +108,11 @@ class PreNorm(nn.Module):
 
 class CNBlock1d(nn.Module):
     def __init__(
-        self, dim, layer_scale: float = 1e-4, norm_layer: Optional[Callable[..., nn.Module]] = None, kernel_size=9
+        self,
+        dim,
+        layer_scale: float = 1e-4,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+        kernel_size=9,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -117,7 +120,13 @@ class CNBlock1d(nn.Module):
 
         self.block = nn.Sequential(
             nn.Conv1d(
-                dim, dim, kernel_size=kernel_size, padding=kernel_size // 2, groups=dim, bias=True, padding_mode="replicate"
+                dim,
+                dim,
+                kernel_size=kernel_size,
+                padding=kernel_size // 2,
+                groups=dim,
+                bias=True,
+                padding_mode="replicate",
             ),
             Permute([0, 2, 1]),
             norm_layer(dim),
@@ -152,7 +161,9 @@ class LayerNorm(nn.Module):
 
     def forward(self, x):
         if self.data_format == "channels_last":
-            return F.layer_norm(x, self.normalized_shape, self.weight, self.bias, self.eps)
+            return F.layer_norm(
+                x, self.normalized_shape, self.weight, self.bias, self.eps
+            )
         elif self.data_format == "channels_first":
             u = x.mean(1, keepdim=True)
             s = (x - u).pow(2).mean(1, keepdim=True)
@@ -191,7 +202,10 @@ class DownSample(nn.Sequential):
     def __init__(self, in_ch, out_ch=None, ks=4):
         if out_ch is None:
             out_ch = in_ch
-        super().__init__(LayerNorm(in_ch, data_format="channels_first"), nn.Conv1d(in_ch, out_ch, kernel_size=ks, stride=ks))
+        super().__init__(
+            LayerNorm(in_ch, data_format="channels_first"),
+            nn.Conv1d(in_ch, out_ch, kernel_size=ks, stride=ks),
+        )
 
 
 class ConvNextBlock2(nn.Module):
@@ -208,9 +222,13 @@ class ConvNextBlock2(nn.Module):
 
         super().__init__()
         self.lin = nn.Conv1d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect")
+        self.dwconv = nn.Conv1d(
+            dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect"
+        )
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(
+            dim, mult * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
@@ -242,7 +260,13 @@ class PreNormResidual(nn.Module):
 
 def FeedForwardFlip(dim, expansion_factor=4, dropout=0.0, dense=nn.Linear):
     inner_dim = int(dim * expansion_factor)
-    return nn.Sequential(dense(dim, inner_dim), nn.GELU(), nn.Dropout(dropout), dense(inner_dim, dim), nn.Dropout(dropout))
+    return nn.Sequential(
+        dense(dim, inner_dim),
+        nn.GELU(),
+        nn.Dropout(dropout),
+        dense(inner_dim, dim),
+        nn.Dropout(dropout),
+    )
 
 
 class PixelShuffle1D(nn.Module):
@@ -264,7 +288,9 @@ class PixelShuffle1D(nn.Module):
         long_channel_len = short_channel_len // self.upscale_factor
         long_width = self.upscale_factor * short_width
 
-        x = x.contiguous().view([batch_size, self.upscale_factor, long_channel_len, short_width])
+        x = x.contiguous().view(
+            [batch_size, self.upscale_factor, long_channel_len, short_width]
+        )
         x = x.permute(0, 2, 3, 1).contiguous()
         x = x.view(batch_size, long_channel_len, long_width)
 
@@ -284,7 +310,10 @@ class UNetDepthOne(nn.Module):
 
         self.down = DownSample(dim, dim * mult, ks=scale_factor)
         self.middle = ConvNextBlock2(dim * mult)
-        self.up = nn.Sequential(nn.Conv1d(dim * mult, dim * scale_factor, 1, groups=dim), PixelShuffle1D(scale_factor))
+        self.up = nn.Sequential(
+            nn.Conv1d(dim * mult, dim * scale_factor, 1, groups=dim),
+            PixelShuffle1D(scale_factor),
+        )
 
         self.final = nn.Sequential(
             ConvNextBlock2(dim * 2, mult=2),
@@ -312,21 +341,50 @@ class RMSNorm(nn.Module):
         return F.normalize(x, dim=-1) * self.scale * self.gamma
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, mult=4, dropout=0.0):
+# class FeedForward(nn.Module):
+#     def __init__(self, dim, mult=4, dropout=0.0):
+#         super().__init__()
+#         dim_inner = int(dim * mult)
+#         self.net = nn.Sequential(
+#             RMSNorm(dim),
+#             nn.Linear(dim, dim_inner),
+#             nn.GELU(),
+#             nn.Dropout(dropout),
+#             nn.Linear(dim_inner, dim),
+#             nn.Dropout(dropout),
+#         )
+
+#     def forward(self, x):
+#         return self.net(x)
+
+
+class ConvFFGated(nn.Module):
+    def __init__(self, dim, mult=4, norm=True, ks=3, **kwargs):
         super().__init__()
         dim_inner = int(dim * mult)
-        self.net = nn.Sequential(
-            RMSNorm(dim),
-            nn.Linear(dim, dim_inner),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(dim_inner, dim),
-            nn.Dropout(dropout),
+        self.lin_in = nn.Sequential(
+            RMSNorm(dim) if norm else nn.Identity(),
+            Rearrange("b z c -> b c z"),
+            nn.Conv1d(dim, dim_inner, ks, padding=ks // 2, padding_mode="reflect"),
+            nn.SiLU(),
+        )
+        self.linear_v = nn.Sequential(
+            nn.Linear(dim, dim_inner, bias=False), Rearrange("b z c -> b c z")
+        )
+
+        self.lin_out = nn.Sequential(
+            Rearrange("b c z -> b z c"),
+            nn.Linear(dim_inner, dim, bias=False),
+            # nn.Conv1d(dim_inner, dim, ks, padding=ks // 2, padding_mode="reflect"),
         )
 
     def forward(self, x):
-        return self.net(x)
+        v = self.linear_v(x)
+        x = self.lin_in(x)
+        return self.lin_out(x * v)
+
+
+# x_transformers.FeedForward = ConvFFGated
 
 
 class ConvFF(nn.Module):
@@ -335,206 +393,129 @@ class ConvFF(nn.Module):
         dim_inner = int(dim * mult)
         self.net = nn.Sequential(
             RMSNorm(dim) if norm else nn.Identity(),
-            # nn.Linear(dim_inner, dim_inner),
-            Rearrange("b z c -> b c z"),
+            Rearrange("b z t c -> (b t) c z"),
             nn.Conv1d(dim, dim_inner, 3, padding=1, padding_mode="reflect"),
             nn.GELU(),
-            # GRN_CH_First(dim_inner),
             nn.Conv1d(dim_inner, dim, 3, padding=1, padding_mode="reflect"),
-            Rearrange("b c z -> b z c"),
-            # nn.Linear(dim_inner, dim),
+            Rearrange("(b t) c z -> b z t c", t=27),
         )
 
     def forward(self, x):
         return self.net(x)
 
 
-FlashAttentionConfig = namedtuple("FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"])
+# FlashAttentionConfig = namedtuple(
+#     "FlashAttentionConfig", ["enable_flash", "enable_math", "enable_mem_efficient"]
+# )
 
 
-class Attend(nn.Module):
-    def __init__(self, dropout=0.0, flash=False, scale=None):
-        super().__init__()
-        self.scale = scale
-        self.dropout = dropout
-        self.attn_dropout = nn.Dropout(dropout)
-
-        # determine efficient attention configs for cuda and cpu
-
-        self.cpu_config = FlashAttentionConfig(True, True, True)
-        self.cuda_config = None
-
-        if not torch.cuda.is_available() or not flash:
-            return
-
-        device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
-
-        # if device_properties.major == 8 and device_properties.minor == 0:
-        #     print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
-        self.cuda_config = FlashAttentionConfig(True, False, False)
-        # else:
-        #     print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
-        #     self.cuda_config = FlashAttentionConfig(False, True, True)
-
-    def flash_attn(self, q, k, v):
-        _, heads, q_len, _, k_len, is_cuda, device = *q.shape, k.shape[-2], q.is_cuda, q.device
-        # Check if there is a compatible device for flash attention
-
-        config = self.cuda_config if is_cuda else self.cpu_config
-
-        # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
-        # print(q.shape, k.shape, v.shape)
-
-        # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
-        # with torch.backends.cuda.sdp_kernel(**config._asdict()):
-        # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout if self.training else 0.0)
-
-        return out
-
-    def forward(self, q, k, v):
-        """
-        einstein notation
-        b - batch
-        h - heads
-        n, i, j - sequence length (base sequence length, source, target)
-        d - feature dimension
-        """
-
-        return self.flash_attn(q, k, v)
-
-
-class Attention(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.0, rotary_embed=None, flash=True, norm=False):
-        super().__init__()
-        self.heads = heads
-        self.scale = dim_head**-0.5
-        dim_inner = heads * dim_head
-
-        self.rotary_embed = rotary_embed
-
-        self.attend = Attend(flash=flash, dropout=dropout)
-
-        self.norm = RMSNorm(dim) if norm else nn.Identity()
-
-        self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
-
-        self.to_gates = nn.Linear(dim, heads)
-
-        self.to_out = nn.Sequential(nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout))
-
-    def forward(self, x):
-        x = self.norm(x)
-
-        q, k, v = rearrange(self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads)
-
-        if self.rotary_embed is not None:
-            q = self.rotary_embed.rotate_queries_or_keys(q)
-            k = self.rotary_embed.rotate_queries_or_keys(k)
-
-        out = self.attend(q, k, v)
-
-        gates = self.to_gates(x)
-        out = out * rearrange(gates, "b n h -> b h n 1").sigmoid()
-
-        out = rearrange(out, "b h n d -> b n (h d)")
-        return self.to_out(out)
-
-
-# class DeepNormTransformerLayer(nn.Module):
-#     """
-#     ## Transformer Decoder Layer with DeepNorm
-
-#     This implements a transformer decoder layer with DeepNorm.
-#     Encoder layers will have a similar form.
-#     """
-
-#     def __init__(
-#         self,
-#         *,
-#         d_model: int,
-#         self_attn,
-#         feed_forward,
-#         deep_norm_alpha: float,
-#         deep_norm_beta: float,
-#     ):
-#         """
-#         :param d_model: is the token embedding size
-#         :param self_attn: is the self attention module
-#         :param feed_forward: is the feed forward module
-#         :param deep_norm_alpha: is $\alpha$ coefficient in DeepNorm
-#         :param deep_norm_beta: is $\beta$ constant for scaling weights initialization
-#         """
+# class Attend(nn.Module):
+#     def __init__(self, dropout=0.0, flash=False, scale=None):
 #         super().__init__()
+#         self.scale = scale
+#         self.dropout = dropout
+#         self.attn_dropout = nn.Dropout(dropout)
 
-#         self.self_attn = self_attn
-#         self.feed_forward = feed_forward
-#         # DeepNorms after attention and feed forward network
-#         self.self_attn_norm = DeepNorm(deep_norm_alpha, [d_model])
-#         self.feed_forward_norm = DeepNorm(deep_norm_alpha, [d_model])
+#         # determine efficient attention configs for cuda and cpu
 
-#         # Scale weights after initialization
-#         with torch.no_grad():
-#             # Feed forward network linear transformations
-#             for name, weight in feed_forward.named_parameters():
-#                 if "weight" in name:
-#                     weight *= deep_norm_beta
+#         self.cpu_config = FlashAttentionConfig(True, True, True)
+#         self.cuda_config = None
 
-#             # Attention value projection
-#             self_attn.to_gates.weight *= deep_norm_beta
-#             # Attention output project
-#             self_attn.to_out[0].weight *= deep_norm_beta
-#             # self_attn.output.weight *= deep_norm_beta
+#         if not torch.cuda.is_available() or not flash:
+#             return
 
-#         # The mask will be initialized on the first call
-#         self.mask = None
+#         device_properties = torch.cuda.get_device_properties(torch.device("cuda"))
 
-#     def forward(self, x: torch.Tensor):
+#         # if device_properties.major == 8 and device_properties.minor == 0:
+#         #     print_once('A100 GPU detected, using flash attention if input tensor is on cuda')
+#         self.cuda_config = FlashAttentionConfig(True, False, False)
+#         # else:
+#         #     print_once('Non-A100 GPU detected, using math or mem efficient attention if input tensor is on cuda')
+#         #     self.cuda_config = FlashAttentionConfig(False, True, True)
+
+#     def flash_attn(self, q, k, v):
+#         _, heads, q_len, _, k_len, is_cuda, device = (
+#             *q.shape,
+#             k.shape[-2],
+#             q.is_cuda,
+#             q.device,
+#         )
+#         # Check if there is a compatible device for flash attention
+
+#         config = self.cuda_config if is_cuda else self.cpu_config
+
+#         # pytorch 2.0 flash attn: q, k, v, mask, dropout, softmax_scale
+#         # print(q.shape, k.shape, v.shape)
+
+#         # with torch.nn.attention.sdpa_kernel(SDPBackend.FLASH_ATTENTION):  # torch.backends.cuda.sdp_kernel(**config._asdict()):
+#         # with torch.backends.cuda.sdp_kernel(**config._asdict()):
+#         # with torch.nn.attention.sdpa_kernel(SDPBackend.EFFICIENT_ATTENTION):
+#         out = F.scaled_dot_product_attention(
+#             q, k, v, dropout_p=self.dropout if self.training else 0.0
+#         )
+
+#         return out
+
+#     def forward(self, q, k, v):
 #         """
-#         :param x: are the embeddings of shape `[seq_len, batch_size, d_model]`
+#         einstein notation
+#         b - batch
+#         h - heads
+#         n, i, j - sequence length (base sequence length, source, target)
+#         d - feature dimension
 #         """
 
-#         # Run through self attention, i.e. keys and values are from self
-#         x = self.self_attn_norm(x, self.self_attn(x))
-#         # Pass through the feed-forward network
-#         x = self.feed_forward_norm(x, self.feed_forward(x))
-
-#         return x
+#         return self.flash_attn(q, k, v)
 
 
-# class DeepNormTransformer(nn.Sequential):
+# class Attention(nn.Module):
 #     def __init__(
 #         self,
-#         *,
 #         dim,
-#         depth,
-#         alpha,
-#         beta,
-#         dim_head=64,
 #         heads=8,
-#         attn_dropout=0.0,
-#         ff_mult=4,
+#         dim_head=64,
+#         dropout=0.0,
 #         rotary_embed=None,
-#         flash_attn=True,
+#         flash=True,
+#         norm=False,
 #     ):
-#         layers = [
-#             DeepNormTransformerLayer(
-#                 d_model=dim,
-#                 self_attn=Attention(
-#                     dim,
-#                     dim_head=dim_head,
-#                     heads=heads,
-#                     dropout=attn_dropout,
-#                     rotary_embed=rotary_embed,
-#                     flash=flash_attn,
-#                 ),
-#                 feed_forward=ConvFF(dim, mult=ff_mult),
-#                 deep_norm_alpha=alpha,
-#                 deep_norm_beta=beta,
-#             )
-#             for _ in range(depth)
-#         ]
-#         super().__init__(*layers)
+#         super().__init__()
+#         self.heads = heads
+#         self.scale = dim_head**-0.5
+#         dim_inner = heads * dim_head
+
+#         self.rotary_embed = rotary_embed
+
+#         self.attend = Attend(flash=flash, dropout=dropout)
+
+#         self.norm = RMSNorm(dim) if norm else nn.Identity()
+
+#         self.to_qkv = nn.Linear(dim, dim_inner * 3, bias=False)
+
+#         self.to_gates = nn.Linear(dim, heads)
+
+#         self.to_out = nn.Sequential(
+#             nn.Linear(dim_inner, dim, bias=False), nn.Dropout(dropout)
+#         )
+
+#     def forward(self, x):
+#         x = self.norm(x)
+
+#         q, k, v = rearrange(
+#             self.to_qkv(x), "b n (qkv h d) -> qkv b h n d", qkv=3, h=self.heads
+#         )
+
+#         if self.rotary_embed is not None:
+#             q = self.rotary_embed.rotate_queries_or_keys(q)
+#             k = self.rotary_embed.rotate_queries_or_keys(k)
+
+#         out = self.attend(q, k, v)
+
+#         gates = self.to_gates(x)
+#         out = out * rearrange(gates, "b n h -> b h n 1").sigmoid()
+
+#         out = rearrange(out, "b h n d -> b n (h d)")
+#         return self.to_out(out)
 
 
 class Transformer(nn.Module):
@@ -552,24 +533,29 @@ class Transformer(nn.Module):
         rotary_embed=None,
         flash_attn=True,
         use_khan=False,
+        attend_start=4,
     ):
         super().__init__()
         self.layers = nn.ModuleList([])
 
-        for _ in range(depth):
+        for n in range(depth):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        Attention(
-                            dim=dim,
-                            dim_head=dim_head,
-                            heads=heads,
-                            dropout=attn_dropout,
-                            rotary_embed=rotary_embed,
-                            flash=flash_attn,
-                            norm=True,
+                        (
+                            Attention(
+                                dim=dim,
+                                dim_head=dim_head,
+                                heads=heads,
+                                dropout=attn_dropout,
+                                rotary_embed=rotary_embed,
+                                flash=flash_attn,
+                                norm=True,
+                            )
+                            if n >= attend_start
+                            else ConvFFGated(dim, mult=ff_mult, norm=True, ks=5)
                         ),
-                        ConvFF(dim, mult=ff_mult, norm=True),
+                        ConvFFGated(dim, mult=ff_mult, norm=True),
                         # FastKAN([dim, dim]) if use_khan else FeedForward(dim=dim, mult=ff_mult, dropout=ff_dropout),
                     ]
                 )
@@ -594,17 +580,34 @@ class ConvNextTr(nn.Module):
         drop_path (float): Stochastic depth rate. Default: 0.0
     """
 
-    def __init__(self, dim_in, dim=None, mult=8, drop_path=0.0, ks=3, rot_emb=None, heads=8, dim_head=64, flash=True):
+    def __init__(
+        self,
+        dim_in,
+        dim=None,
+        mult=8,
+        drop_path=0.0,
+        ks=3,
+        rot_emb=None,
+        heads=8,
+        dim_head=64,
+        flash=True,
+    ):
         if dim is None:
             dim = dim_in
 
         super().__init__()
         self.lin = nn.Conv1d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
 
-        self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash)
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect")
+        self.attend = Attention(
+            dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb, flash=flash
+        )
+        self.dwconv = nn.Conv1d(
+            dim, dim, kernel_size=ks, padding=ks // 2, groups=dim, padding_mode="reflect"
+        )
         self.norm = LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, mult * dim)  # pointwise/1x1 convs, implemented with linear layers
+        self.pwconv1 = nn.Linear(
+            dim, mult * dim
+        )  # pointwise/1x1 convs, implemented with linear layers
         self.act = nn.GELU()
         self.grn = GRN(mult * dim)
         self.pwconv2 = nn.Linear(mult * dim, dim)
@@ -628,7 +631,14 @@ class ConvNextTr(nn.Module):
 
 
 class UnetConvnext(nn.Module):
-    def __init__(self, num_in, dim, dim_mults=(1, 2, 4), residual=False, block=partial(ConvNextBlock2, ks=5)):
+    def __init__(
+        self,
+        num_in,
+        dim,
+        dim_mults=(1, 2, 4),
+        residual=False,
+        block=partial(ConvNextBlock2, ks=5),
+    ):
         super().__init__()
         self.residual = residual
 
@@ -653,7 +663,13 @@ class UnetConvnext(nn.Module):
                         nn.Sequential(
                             block(dim_in, dim_out),
                             Rearrange("b c z -> b z c"),
-                            Transformer(dim=dim_out, depth=1, dim_head=64, heads=heads, rotary_embed=pos_emb),
+                            Transformer(
+                                dim=dim_out,
+                                depth=1,
+                                dim_head=64,
+                                heads=heads,
+                                rotary_embed=pos_emb,
+                            ),
                             Rearrange("b z c -> b c z"),
                             block(dim_out, dim_out),
                         ),
@@ -666,7 +682,9 @@ class UnetConvnext(nn.Module):
         self.mid_block1 = block(mid_dim, mid_dim)
         self.mid_attn = nn.Sequential(
             Rearrange("b c z -> b z c"),
-            Transformer(dim=mid_dim, depth=1, dim_head=64, heads=heads, rotary_embed=pos_embs[-1]),
+            Transformer(
+                dim=mid_dim, depth=1, dim_head=64, heads=heads, rotary_embed=pos_embs[-1]
+            ),
             Rearrange("b z c -> b c z"),
         )
 
@@ -683,11 +701,21 @@ class UnetConvnext(nn.Module):
                         nn.Sequential(
                             block(dim_out * 2, dim_in),
                             Rearrange("b c z -> b z c"),
-                            Transformer(dim=dim_in, depth=1, dim_head=64, heads=heads, rotary_embed=pos_emb),
+                            Transformer(
+                                dim=dim_in,
+                                depth=1,
+                                dim_head=64,
+                                heads=heads,
+                                rotary_embed=pos_emb,
+                            ),
                             Rearrange("b z c -> b c z"),
                             block(dim_in, dim_in),
                         ),
-                        nn.Upsample(scale_factor=2, mode="linear", align_corners=True) if not is_last else nn.Identity(),
+                        (
+                            nn.Upsample(scale_factor=2, mode="linear", align_corners=True)
+                            if not is_last
+                            else nn.Identity()
+                        ),
                     ]
                 )
             )
@@ -738,6 +766,238 @@ class WaveLetBlock(nn.Module):
         return wavelet_transform(x, self.wavelet, self.levels)
 
 
+class ConvNextEnc(nn.Module):
+    """ConvNeXtV2 Block + Attention."""
+
+    def __init__(
+        self,
+        dim_in,
+        dim=None,
+        use_x_enc=True,
+        mult=4,
+        ks=27,
+        rot_emb=None,
+        heads=8,
+        dim_head=64,
+    ):
+        if dim is None:
+            dim = dim_in
+
+        super().__init__()
+        self.lin = nn.Conv2d(dim_in, dim, 1) if dim_in != dim else nn.Identity()
+
+        # self.attend = Attention(dim, heads=heads, dim_head=dim_head, rotary_embed=rot_emb)
+        self.dwconv = nn.Conv2d(
+            dim,
+            dim,
+            kernel_size=(1, ks),
+            # padding=(ks // 2, 1),
+            groups=dim,
+            padding_mode="reflect",
+        )
+        # self.to_ch_last = Rearrange("b c z t -> (b t) z c")
+        self.norm = LayerNorm(dim * 2 if use_x_enc else dim, eps=1e-6)
+
+        self.pwconv1 = nn.Linear((dim * 2 if use_x_enc else dim), mult * dim)
+        self.act = nn.GELU()
+        self.grn = GRN(mult * dim)
+        self.pwconv2 = nn.Linear(mult * dim, dim)
+
+        # self.identity = nn.Identity() if dim == dim_in else nn.Conv2d(dim_in, dim, 1)
+
+    def forward(self, x, x_enc=None):
+        x = self.lin(x)
+        x = self.dwconv(x)
+        x = x.permute(0, 2, 3, 1)
+
+        if x_enc is not None:
+            x = torch.cat((x, x_enc.permute(0, 2, 3, 1)), dim=-1)
+        x = self.norm(x)
+
+        # x = self.to_ch_last(x)
+        # x = self.attend(x)
+
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.grn(x)
+        x = self.pwconv2(x)
+        x = x.permute(0, 3, 1, 2)
+        # x = self.to_ch_first(x)
+
+        if x_enc is not None:
+            return x + x_enc
+        else:
+            return x
+
+
+class AttendRot(nn.Module):
+    def __init__(self, *, rot_emb, **kwargs):
+        super().__init__()
+        self.rot_emb = rot_emb
+        self.attend = Attention(**kwargs)
+
+    def forward(self, x):
+        pos = torch.arange(x.shape[1], device=x.device)
+        rotary_pos_emb = self.rot_emb(pos)
+
+        return self.attend(x, rotary_pos_emb=rotary_pos_emb)
+
+
+class XTrEncoder(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        depth: int,
+        num_in_2d,
+        num_3d_in,
+        num_vert=60,
+        num_cond=27,  # 9 positions, *3 time steps
+        pos_emb_ch=9,
+    ):
+        super().__init__()
+        mult_fac_2d = 1
+
+        dim_in = dim // 2
+        dim = dim // 2
+        self.pos_emb_ch = pos_emb_ch
+
+        self.rot_emb = RotaryEmbedding(dim=64)
+
+        self.layer_2d_3d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange("b (c z) t -> b c z t", c=num_in_2d * mult_fac_2d, z=num_vert),
+        )
+
+        self.layer_3d = nn.Sequential(
+            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+            nn.Conv2d(
+                num_3d_in,
+                dim_in - num_in_2d * mult_fac_2d,
+                kernel_size=1,
+            ),
+        )
+        self.proj = Rearrange(
+            "b c z t -> b z t c"
+        )  # nn.Identity()  # nn.Conv1d(dim_in, dim, 1)
+
+        self.blocks = nn.ModuleList(
+            [
+                nn.ModuleList(
+                    [
+                        nn.Linear(pos_emb_ch, dim),
+                        nn.Sequential(
+                            Rearrange("b z t c -> (b z) t c"),
+                            Attention(
+                                dim,
+                                heads=dim // 64,
+                                dim_head=64,
+                                talking_heads=True,
+                            ),
+                            Rearrange("(b z) t c -> b z t c", z=num_vert),
+                        ),
+                        # nn.Sequential(
+                        #     Rearrange("b z t c -> (b t) z c"),
+                        #     AttendRot(
+                        #         dim=dim,
+                        #         heads=dim // 64,
+                        #         dim_head=64,
+                        #         talking_heads=True,
+                        #         rot_emb=self.rot_emb,
+                        #     ),
+                        #     Rearrange("(b t) z c -> b z t c", t=num_cond),
+                        # ),
+                        ConvFF(
+                            dim,
+                            mult=2,
+                            # glu=False,
+                            # swish=False,
+                        ),
+                    ]
+                )
+                for n in range(depth)
+            ]
+        )
+        self.out = Rearrange("b z t c -> b c z t")
+
+        # nn.Identity()  # nn.Conv1d(dim, dim_in, 1)
+
+    def forward(self, xp, x1d):
+        xp = self.layer_2d_3d(xp)
+        x1d = self.layer_3d(x1d)
+
+        x_enc = torch.cat((x1d, xp), dim=1)
+        x_m = x_enc[..., 0]
+
+        x = self.proj(x_enc)
+        x_emb = x[..., -self.pos_emb_ch :]
+
+        for pos_emb, attn1, ff in self.blocks:
+            x1 = attn1(x + pos_emb(x_emb))
+            # x2 = attn2(x)
+            x = ff(x1) + x
+
+        x = self.out(x)
+        x = x[..., 0]
+
+        return torch.cat((x, x_m), dim=1)
+
+
+class XEncoder(nn.Module):
+
+    def __init__(self, dim: int, depth: int, num_in_2d, num_3d_in, num_vert=60, emb_in=5):
+        super().__init__()
+        mult_fac_2d = 1
+        dim_in = dim // 2
+
+        emb_dim = 32
+        self.emb_in = emb_in
+        self.emb = nn.Conv2d(emb_in, emb_dim, 1, 1)
+
+        self.layer_2d_3d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange("b (c z) t -> b c z t", c=num_in_2d * mult_fac_2d, z=num_vert),
+        )
+
+        self.layer_3d = nn.Sequential(
+            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
+            nn.Conv2d(
+                num_3d_in,
+                dim_in - num_in_2d * mult_fac_2d - emb_dim,
+                kernel_size=1,
+            ),
+        )
+
+        self.blocks = nn.ModuleList(
+            [ConvNextEnc(dim_in, dim, use_x_enc=n > 0, mult=2) for n in range(depth)]
+        )
+        self.out = nn.Conv1d(dim, dim_in, 1)
+
+    def forward(self, xp, x1d):
+        xp = self.layer_2d_3d(xp)
+        x1d = self.layer_3d(x1d)
+
+        x_enc = torch.cat((xp, x1d, self.emb(xp[:, -self.emb_in :])), dim=1)
+        x_m = x_enc[..., 0]
+
+        x = None
+        for b in self.blocks:
+            x = b(x_enc, x)
+        x = x[..., 0]
+        x = self.out(x)
+
+        return torch.cat((x, x_m), dim=1)
+
+
 class Net(nn.Module):
     def __init__(
         self,
@@ -745,138 +1005,76 @@ class Net(nn.Module):
         num_3d_in,
         num_2d_out,
         num_3d_out,
-        num_static=5,
-        num_3d_start=6,
+        model_config: ModelConfig,
+        y_class=False,
+        y_class_mask=None,
         num_vert=60,
-        dim=512,
-        depth=6,
-        block=ConvNextBlock2,
-        num_emb=384,
-        emb_ch=32,
-        use_emb: bool = False,
-        frac_idxs=None,
-        model_type="transformer",
     ):
         super().__init__()
         self.num_2d_in = num_in_2d
-        self.num_static = num_static
-        num_in_2d = num_in_2d + num_static
-        if use_emb:
-            self.embedding = nn.Embedding(num_emb, emb_ch)
-            num_in_2d += emb_ch
-        else:
-            self.embedding = None
+
+        dim = model_config.dim
+        depth = model_config.depth
+        inc_1d_norm = model_config.inc_1d_norm
+
+        self.inc_1d_norm = inc_1d_norm
+        num_in_2d = num_in_2d
+
+        assert num_in_2d == 16
+        assert num_3d_in == 9
 
         self.num_3d_in = num_3d_in
         self.num_2d_out = num_2d_out
         self.num_3d_out = num_3d_out
         self.num_vert = num_vert
-        self.frac_idxs = frac_idxs
-        self.num_3d_start = num_3d_start
 
-        self.layer_2d_3d = nn.Sequential(
-            nn.Conv2d(num_in_2d, num_in_2d * num_vert, kernel_size=(1, 3), groups=num_in_2d),
-            Rearrange("b (c z) k x -> b c (z k x)", c=num_in_2d, z=num_vert, x=1, k=1),
-        )
-
-        self.layer_3d = nn.Sequential(
-            Rearrange("b (c z) t -> b c z t", c=num_3d_in, z=num_vert),
-            nn.Conv2d(
-                num_3d_in,
-                dim - num_in_2d,
-                kernel_size=(1, 3),
+        mult_fac_2d = 1
+        self.layer_proj_1d = nn.Sequential(
+            nn.Conv1d(
+                num_in_2d,
+                num_in_2d * num_vert * mult_fac_2d,
+                kernel_size=1,
+                groups=num_in_2d,
+            ),
+            Rearrange(
+                "b (c z) k -> b (c k) z", c=num_in_2d * mult_fac_2d, z=num_vert, k=1
             ),
         )
 
-        heads = dim // 64
-        self.rotary_embed = RotaryEmbedding(dim=dim // heads)
-        deep_norm_alpha = (2.0 * depth) ** (1.0 / 4.0)
-        deep_norm_beta = (8.0 * depth) ** -(1.0 / 4.0)
-
-        # layers = []
-        # for n in range(depth):
-        #     layers.extend([Block(dim,),
-        #                     Rearrange('b c z -> b z c'),
-        #                    Transformer(dim=dim, depth=1, dim_head=dim//heads,
-        #                                         heads=heads, rotary_embed=self.rotary_embed),
-        #                     Rearrange('b z c -> b c z')])
-        # self.blocks = nn.Sequential(*layers)
-        if model_type == "transformer":
-            # self.blocks = nn.Sequential(
-            #     *[ConvNextTr(dim, dim, ks=5, rot_emb=self.rotary_embed, flash=True, dim_head=dim // heads) for _ in range(depth)]
-            # )
-            # self.blocks = nn.Sequential(
-            #     Rearrange("b c z -> b z c"),
-            #     DeepNormTransformer(
-            #         dim=dim,
-            #         depth=depth,
-            #         alpha=deep_norm_alpha,
-            #         beta=deep_norm_beta,
-            #         dim_head=dim // heads,
-            #         heads=heads,
-            #         rotary_embed=self.rotary_embed,
-            #         flash_attn=True,
-            #     ),
-            #     Rearrange("b z c -> b c z"),
-            # )
-
-            self.blocks = nn.Sequential(
-                Rearrange("b c z -> b z c"),
-                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-                Rearrange("b z c -> b c z"),
-            )
+        if self.inc_1d_norm:
+            num_3d_in *= 2
         else:
-            self.blocks = nn.Sequential(
-                # UNetDepthOne(dim, num_out=dim),
-                Rearrange("b c z -> b z c"),
-                Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
-                Rearrange("b z c -> b c z"),
-            )
-        # self.blocks = UnetConvnext(num_in=dim, dim=dim, residual=False)
+            print("No 1D norm")
+        self.layer_re_1d = Rearrange("b (c z) -> b c z", z=num_vert)
 
-        # conv_down = partial(nn.Conv3d, kernel_size=[1, 3, 3], padding=(0, 0, 0), padding_mode='reflect')
-        # layers = [conv_down(num_2d_3d + num_3d_in, mid_ch//2), nn.GELU(),
-        #           conv_down(mid_ch//2, mid_ch), nn.GELU(),
-        #           Rearrange('b c z y x -> b c (z y x)', y=1, x=1)]
-        # self.emb = Embedder(num_vert, 8)
-        # chan_first, chan_last = partial(nn.Conv1d, kernel_size = 1), nn.Linear
+        self.layer_1d_lin = nn.Conv1d(
+            num_3d_in,
+            dim - num_in_2d * mult_fac_2d,
+            kernel_size=1,
+        )
 
-        # layers = [Permute([0, 2, 1])]
-        # for n in range(depth):
-        #     layers.append(PreNormResidual(dim, FeedForward(num_vert, 4, dense=chan_first)))
-        #     layers.append(PreNormResidual(dim, FeedForward(dim, 4, dense=chan_last)))
-        # layers.append(nn.LayerNorm(dim))
-        # layers.append(Permute([0, 2, 1]))
+        config_dict = model_config.model_dump()
+        head_dim = config_dict.pop("head_dim")
+        del config_dict["inc_1d_norm"]
+        config_dict["heads"] = dim // head_dim
 
-        # layers = []
-        # for n in range(depth):
-        #     layers.append(block(dim))
-        # self.blocks = nn.Sequential(*layers)
-        # self.blocks = MWT1d(dim, depth=depth)
-        # for n in range(num_blocks):
-        #     layers.append(block(mid_ch))
-        #     # if include_atten:
-        #     #     atten = nn.Sequential(self.emb, LinearAttention(mid_ch+8, mid_ch))
-        #     #     layers.append(Residual(PreNorm(mid_ch, atten)))
-        #     layers.append(block(mid_ch))
+        # self.rotary_embed = RotaryEmbedding(dim=dim // heads)
+        # self.enc = XEncoder(dim, 5, num_in_2d, num_3d_in, num_vert)
+
+        self.blocks = nn.Sequential(
+            # block(dim),
+            Rearrange("b c z -> b z c"),
+            # Transformer(dim=dim, depth=depth, dim_head=dim // heads, heads=heads, rotary_embed=self.rotary_embed),
+            AttentionLayers(
+                **config_dict
+            ),
+            Rearrange("b z c -> b c z"),
+        )
 
         self.final_mult = 16
-        out_3d = num_3d_out * self.final_mult * num_vert
-
-        # self.out_3d = nn.Sequential(Block(dim),
-        #                             nn.Conv1d(dim, num_3d_out*self.final_mult, 1),
-        #                             nn.GELU(),
-        #                             LayerNorm(num_3d_out*self.final_mult, data_format='channels_first'),
-        #                             Rearrange('b c (z h) -> b (c z) h', h=1),)
-
-        # self.out_3d_2 = nn.Sequential(nn.Conv1d(out_3d, out_3d, 2, 2, groups=out_3d),
-        #                                 LayerNorm(out_3d, data_format='channels_first'),
-        #                                 nn.GELU(),
-        #                                 nn.Conv1d(out_3d, num_3d_out*num_vert, 1, groups=num_3d_out),
-        #                                 Rearrange('b c h -> b (c h)', h=1))
 
         self.out_3d = nn.Sequential(
-            block(dim),
+            # block(dim),
             nn.Conv1d(dim, num_3d_out, 1),
             Rearrange("b c z -> b (c z)"),
             nn.Linear(
@@ -885,176 +1083,45 @@ class Net(nn.Module):
             ),
         )
 
-        self.out_2d = nn.Sequential(block(dim), nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean"))
+        self.out_2d = nn.Sequential(
+            nn.Conv1d(dim, num_2d_out, 1), Reduce("b c z -> b c", "mean")
+        )
 
-    def forward(self, x):
-        # create a time dim
-        x = torch.stack(x.split(x.shape[1] // 3, dim=1), dim=-1)
+        self.y_class = y_class
+        if y_class:
+            self.out_class = nn.Sequential(
+                nn.Conv1d(dim, num_3d_out * 3, 1),
+                Rearrange("b (c i) z -> b (c z) i", i=3, z=num_vert),
+            )
 
-        split_idx = self.num_3d_start * self.num_vert
+            self.y_class_mask = y_class_mask
 
-        # Data contains 1d vars, point vars, then 1d, then static vars...
-        x_1d, x_point = x[:, :split_idx], x[:, split_idx:]
+    def forward(self, batch):
+        x_point, x_1d, x_1d_re = batch["x_p"], batch["x_1d"], batch["x_1d_re"]
 
-        x_1d_2, x_point = x_point[:, self.num_2d_in :], x_point[:, : self.num_2d_in]
-        x_1d_2, x_point_2 = x_1d_2[:, : -self.num_static], x_1d_2[:, -self.num_static :]
+        xp_1d = self.layer_proj_1d(x_point[..., None])
+        x_1d = self.layer_re_1d(x_1d)
 
-        x_1d_2 = torch.cat([x_1d, x_1d_2], dim=1)
-        x_point = torch.cat([x_point, x_point_2], dim=1)[:, :, None, :]
+        x_1d_re = rearrange(x_1d_re, "b z c -> b c z")
+        if self.inc_1d_norm:
+            x_1d = torch.cat((x_1d, x_1d_re), dim=1)
 
-        # if self.embedding is not None:
-        #     x_emb = self.embedding(emb_idxs)
-        #     x_2d = torch.cat([x_2d, x_emb], dim=1)
+        x_1d = self.layer_1d_lin(x_1d)
 
-        x_out = torch.cat([self.layer_2d_3d(x_point), self.layer_3d(x_1d_2).squeeze()], dim=1)
-        x_out = self.blocks(x_out)
+        x_out = self.blocks(torch.cat([xp_1d, x_1d], dim=1))
 
         out_3d = self.out_3d(x_out)
 
-        # x_3d_rep = x_3d[:, :, None].repeat(1, self.final_mult, 1)
-        # out_3d = self.out_3d_2(torch.cat([x_3d_rep, out_3d], dim=-1))
-
-        if self.frac_idxs is not None:
-            s, e = self.frac_idxs
-
-            out_frac = out_3d[:, s:e] * x_1d[:, s:e]
-            out_3d[:, s:e] = out_frac
-
         out_2d = self.out_2d(x_out)
 
-        return torch.cat([out_3d, out_2d], dim=1)
+        out = {"reg": torch.cat([out_3d, out_2d], dim=1)}
 
+        if self.y_class:
+            out_c = self.out_class(x_out)
+            out_c = out_c[:, self.y_class_mask[0:360], :]
+            out["logits"] = out_c
+            
+            out_soft = F.softmax(out_c, dim=-1)
+            out["cls_soft"] = out_soft
 
-class Transformer2(nn.Module):
-    def __init__(self, dim, depth, heads=8, dropout=0.0):
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        for _ in range(depth):
-            self.layers.append(
-                nn.ModuleList(
-                    [
-                        PreNormResidual(dim, nn.MultiheadAttention(dim, heads, dropout=dropout)),
-                        PreNormResidual(
-                            dim,
-                            FeedForward(
-                                dim,
-                            ),
-                        ),
-                    ]
-                )
-            )
-
-    def forward(self, x):
-        for attn, ff in self.layers:
-            x = attn(x)
-            x = ff(x)
-        return x
-
-
-class NetMLP(nn.Module):
-    def __init__(self, num_in_2d, num_3d_in, num_2d_out, num_3d_out, num_3d_start=6, num_vert=60, depth=12, dim=512):
-        super().__init__()
-        self.num_2d_in = num_in_2d
-        self.num_3d_in = num_3d_in
-        self.num_2d_out = num_2d_out
-        self.num_3d_out = num_3d_out
-        self.num_vert = num_vert
-        self.num_3d_start = num_3d_start
-
-        layers = [nn.Linear(num_in_2d + num_vert * num_3d_in, dim)]
-        layers += [PreNormResidual(dim, FeedForward(dim)) for _ in range(depth)]
-        layers += [nn.Linear(dim, num_2d_out + num_3d_out * num_vert)]
-
-        self.layers = nn.Sequential(*layers)
-
-    def forward(self, x):
-        x, emb_idxs = x
-        return self.layers(x)
-
-
-class NetTr(nn.Module):
-    def __init__(
-        self,
-        num_in_2d,
-        num_3d_in,
-        num_2d_out,
-        num_3d_out,
-        num_3d_start=6,
-        num_vert=60,
-        dim=1024,
-        depth=6,
-        num_pos_emb=384,
-        use_pos_emb: bool = False,
-        frac_idxs=None,
-    ):
-        super().__init__()
-        # self.num_2d_in = num_in_2d
-
-        self.total_in = num_in_2d + num_3d_in * num_vert
-        self.total_out = num_2d_out + num_3d_out * num_vert
-
-        self.emb_in = nn.Linear(1, dim)
-
-        self.emb_out = nn.Parameter(torch.randn(self.total_out, dim))
-        self.vert_emb = nn.Embedding(num_vert + 1, dim)
-        self.var_emb = nn.Embedding(num_3d_in + num_in_2d + num_2d_out + num_3d_out, dim)
-
-        # Input idxs, 3d, 2d, 3d
-        vert_indxs = torch.arange(0, num_vert, dtype=torch.long).repeat(num_3d_in)
-        vert_indxs_2d = torch.Tensor([num_vert] * num_in_2d).long()
-        vert_indxs = torch.cat([vert_indxs[0 : num_3d_start * num_vert], vert_indxs_2d, vert_indxs[num_3d_start * num_vert :]])
-
-        # output idxs, 3d, 2d
-        vert_indxs = torch.cat([vert_indxs, torch.arange(num_vert, dtype=torch.long).repeat(num_3d_out)])
-        self.vert_indxs = torch.cat([vert_indxs, num_vert * torch.ones(num_2d_out, dtype=torch.long)])
-
-        total_3d = num_3d_in + num_3d_out
-        var_idxs = torch.Tensor([[n] * num_vert for n in range(total_3d)]).flatten().long()
-        var_idxs_2d = torch.arange(total_3d, total_3d + num_in_2d + num_2d_out, step=1, dtype=torch.long)
-
-        # 3d_in, 2d_in, 3d_in_2, 2d_out, 3d_out
-        self.var_idxs = torch.cat(
-            [
-                var_idxs[0 : num_3d_start * num_vert],
-                var_idxs_2d[:num_in_2d],
-                var_idxs[num_3d_start * num_vert :],
-                var_idxs_2d[num_in_2d:],
-            ]
-        )
-
-        self.rotary_embed = RotaryEmbedding(dim=64)
-        # Transformer
-        self.transformer = Transformer(dim=dim, depth=depth, dim_head=64, heads=dim // 64, rotary_embed=self.rotary_embed)
-
-        if use_pos_emb:
-            self.pos_emb = nn.Embedding(num_pos_emb, dim)
-        else:
-            self.pos_emb = None
-
-        self.out = nn.Linear(dim, 1)
-
-    def check_emb_idxs(self, input_names, output_names):
-        return pd.DataFrame(
-            {
-                "names": input_names + output_names,
-                "var_idxs": self.var_idxs.cpu().numpy(),
-                "vert_idxs": self.vert_indxs.cpu().numpy(),
-            }
-        )
-
-    def forward(self, x):
-        x, emb_idxs = x
-        bs, num_in = x.shape
-        # Treat x like a sequence of single channels values
-        x_in = self.emb_in(x[:, :, None])
-        x_out = self.emb_out[None, :, :].repeat(bs, 1, 1)
-        x = torch.cat([x_in, x_out], dim=1)
-
-        x = x + self.vert_emb(self.vert_indxs.to(x.device))[None, :, :]
-        x = x + self.var_emb(self.var_idxs.to(x.device))[None, :, :]
-        if self.pos_emb is not None:
-            x = x + self.pos_emb(emb_idxs)
-
-        x = self.transformer(x)
-        x = x[:, num_in:, :]
-        return self.out(x)[:, :, 0]
+        return out

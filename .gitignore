@@ -1,4 +1,7 @@
+*.png
+*.parquet
 wandb
+checkpoints/
 test_checkpoints/
 lightning_logs/ 
 plots

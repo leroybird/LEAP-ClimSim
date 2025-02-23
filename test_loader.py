@@ -5,6 +5,8 @@
 import logging
 from pathlib import Path
 
+from matplotlib import pyplot as plt
+from config import DataConfig, LoaderConfig, get_data_config
 import dataloader
 import pandas as pd
 import numpy as np
@@ -12,9 +14,13 @@ import torch
 import polars as pl
 
 #%%
+cfg_loader = LoaderConfig()
+cfg_data = get_data_config(cfg_loader)
+cfg_data, cfg_loader
+#%%
 df_index = pd.read_parquet('/mnt/ssd/kaggle/index.parquet')
 grid_info_path = '/mnt/storage/kaggle/ClimSim_low-res_grid-info.nc'
-root_folder = Path('/mnt/storage/kaggle/train')
+root_folder = Path('/mnt/ssd/kaggle/train')
 weights = pd.read_csv('/mnt/ssd/kaggle/sample_submission.csv', nrows=1)
 weights = weights.iloc[0, 1:].values.astype(np.float32)
 
@@ -28,10 +34,81 @@ df_index_tr = df_index[df_index['year'] <= 8]
 df_index_val = df_index[df_index['year'] == 9]
 assert len(df_index) == len(df_index_tr) + len(df_index_val)
 #%%
+train_dl, val_dl = dataloader.setup_dataloaders(loader_cfg=cfg_loader, data_cfg=cfg_data)
+#%%
+class_mask = train_dl.dataset.inner_ds.y_transform.class_mask
+#%%
+batch = next(iter(train_dl))
+#%%
+out = batch['y_cls'].numpy()
+#%%
+y0_amount = (out==0).sum(axis=0).astype(np.float32)/out.shape[0]
+y1_amount = (out==1).sum(axis=0).astype(np.float32)/out.shape[0]
+y2_amount = (out==2).sum(axis=0).astype(np.float32)/out.shape[0]
+y3_amount = (out==3).sum(axis=0).astype(np.float32)/out.shape[0]
+
+
+#%%
+plt.figure(figsize=(12, 12))
+plt.ylim(0, 1)
+plt.plot(y0_amount, label='0')
+plt.plot(y1_amount, label='1')
+plt.plot(y2_amount, label='2')
+plt.plot(y3_amount, label='3')
+plt.legend()
+#%%
+y_norm = batch['y'][:, class_mask]
+y_total = (y_norm**2).sum(axis=0)
+#%%
+data_all = []
+for n in range(y_norm.shape[1]):
+    print(n)
+    s_tot = y_norm[:, n]**2
+    s_0 = y_norm[out[:, n]==0, n]**2
+    s_1 = y_norm[out[:, n]==1, n]**2
+    s_2 = y_norm[out[:, n]==2, n]**2
+    s_3 = y_norm[out[:, n]==3, n]**2
+    
+    data_all.append([s_0.sum()/s_tot.sum(), s_1.sum()/s_tot.sum(), s_2.sum()/s_tot.sum(), s_3.sum()/s_tot.sum()])
+
+
+#%%
+plt.plot(data_all, label=['0', '1', '2', '3'])
+plt.legend()
+
+#%%
+plt.scatter(0, (y_norm[out==0]**2).sum(axis=0)/y_total.sum(), label='0')
+plt.scatter(0, (y_norm[out==1]**2).sum(axis=0)/y_total.sum(), label='1')
+plt.scatter(0, (y_norm[out==2]**2).sum(axis=0)/y_total.sum(), label='2')
+plt.scatter(0, (y_norm[out==3]**2).sum(axis=0)/y_total.sum(), label='3')
+plt.legend()
+
+#%%
+(y_norm[out==0]**2).sum(axis=0)/y_total.sum(), (y_norm[out==1]**2).sum(axis=0)/y_total.sum(), (y_norm[out==2]**2).sum(axis=0)/y_total.sum(), (y_norm[out==3]**2).sum(axis=0)/y_total.sum()
+#%%
+batch = next(iter(val_dl))
+
+#%%
+plt.figure(figsize=(20, 20))
+plt.plot(x.max(dim=0).values[0:450])
+plt.plot(x.min(dim=0).values[0:450])
+plt.ylim(1, -1)
+#%%
+
+
+#%%
 ds_train = dataloader.LeapLoader(root_folder, grid_info_path, df_index_tr,)
 ds_train
 #%%
-ds_train[0][0][:].std(axis=0)
+ds_train.neighbours
+#%%
+
+#%%
+x, y = ds_train[0]
+#%%
+x.shape
+#%%
+x.max()
 #%%
 train_ds_sample
 #%%

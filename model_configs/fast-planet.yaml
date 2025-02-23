@@ -1,0 +1,3 @@
+dim : 512
+depth : 30
+ff_relu_squared : True

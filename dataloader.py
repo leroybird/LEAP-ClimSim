@@ -1,15 +1,11 @@
-from random import shuffle
-from re import I
+from collections import defaultdict
 import torch
 from pathlib import Path
 import xarray as xr
-import dataloader
 import numpy as np
 import pandas as pd
 import config
-import logging
-import polars as pl
-
+from torch.utils.data import DataLoader
 import norm
 
 
@@ -30,9 +26,10 @@ class LeapLoader:
         root_folder: Path,
         grid_info_path,
         df,
+        grid_neighbours_path=Path("__file__").parent / "neighbours.nc",
         x_transform=None,
         y_transform=None,
-        add_static=True,
+        add_static=False,
         muti_step=True,
     ):
         self.root_folder = root_folder
@@ -51,24 +48,42 @@ class LeapLoader:
         self.grid_info = xr.open_dataset(grid_info_path).load()
         self.grid_info.close()
 
+        self.neighbours = xr.open_dataset(grid_neighbours_path).load()
+        self.neighbours.close()
+
         self.level_name = "lev"
         self.sample_name = "sample"
         self.num_levels = len(self.grid_info["lev"])
-        self.num_latlon = len(self.grid_info["ncol"])  # number of unique lat/lon grid points
+        self.num_latlon = len(
+            self.grid_info["ncol"]
+        )  # number of unique lat/lon grid points
 
         # make area-weights
-        self.grid_info["area_wgt"] = self.grid_info["area"] / self.grid_info["area"].mean(dim="ncol")
+        self.grid_info["area_wgt"] = self.grid_info["area"] / self.grid_info["area"].mean(
+            dim="ncol"
+        )
         self.area_wgt = self.grid_info["area_wgt"].values
         # map ncol to nsamples dimension
         # to_xarray = {'area_wgt':(self.sample_name,np.tile(self.grid_info['area_wgt'], int(n_samples/len(self.grid_info['ncol']))))}
         # to_xarray = xr.Dataset(to_xarray)
         self.normalize = True
-        self.lats, self.lats_indices = np.unique(self.grid_info["lat"].values, return_index=True)
-        self.lons, self.lons_indices = np.unique(self.grid_info["lon"].values, return_index=True)
-        self.sort_lat_key = np.argsort(self.grid_info["lat"].values[np.sort(self.lats_indices)])
-        self.sort_lon_key = np.argsort(self.grid_info["lon"].values[np.sort(self.lons_indices)])
+        self.lats, self.lats_indices = np.unique(
+            self.grid_info["lat"].values, return_index=True
+        )
+        self.lons, self.lons_indices = np.unique(
+            self.grid_info["lon"].values, return_index=True
+        )
+        self.sort_lat_key = np.argsort(
+            self.grid_info["lat"].values[np.sort(self.lats_indices)]
+        )
+        self.sort_lon_key = np.argsort(
+            self.grid_info["lon"].values[np.sort(self.lons_indices)]
+        )
         self.indextolatlon = {
-            i: (self.grid_info["lat"].values[i % self.num_latlon], self.grid_info["lon"].values[i % self.num_latlon])
+            i: (
+                self.grid_info["lat"].values[i % self.num_latlon],
+                self.grid_info["lon"].values[i % self.num_latlon],
+            )
             for i in range(self.num_latlon)
         }
 
@@ -124,14 +139,23 @@ class LeapLoader:
         self.lv = 2.501e6  # latent heat of evaporation ~ J/kg
         self.lf = 3.337e5  # latent heat of fusion      ~ J/kg
         self.lsub = self.lv + self.lf  # latent heat of sublimation ~ J/kg
-        self.rho_air = 101325 / (6.02214e26 * 1.38065e-23 / 28.966) / 273.15  # density of dry air at STP  ~ kg/m^3
+        self.rho_air = (
+            101325 / (6.02214e26 * 1.38065e-23 / 28.966) / 273.15
+        )  # density of dry air at STP  ~ kg/m^3
         # ~ 1.2923182846924677
         # SHR_CONST_PSTD/(SHR_CONST_RDAIR*SHR_CONST_TKFRZ)
         # SHR_CONST_RDAIR   = SHR_CONST_RGAS/SHR_CONST_MWDAIR
         # SHR_CONST_RGAS    = SHR_CONST_AVOGAD*SHR_CONST_BOLTZ
         self.rho_h20 = 1.0e3  # density of fresh water     ~ kg/m^ 3
 
-        self.v1_inputs = ["state_t", "state_q0001", "state_ps", "pbuf_SOLIN", "pbuf_LHFLX", "pbuf_SHFLX"]
+        self.v1_inputs = [
+            "state_t",
+            "state_q0001",
+            "state_ps",
+            "pbuf_SOLIN",
+            "pbuf_LHFLX",
+            "pbuf_SHFLX",
+        ]
 
         self.v1_outputs = [
             "ptend_t",
@@ -359,16 +383,30 @@ class LeapLoader:
         """
         # read inputs
         ds_input = self.get_input(input_file)
-        ds_target = self.get_xrdata(input_file.parent / input_file.name.replace(".mli.", ".mlo."))
+        ds_target = self.get_xrdata(
+            input_file.parent / input_file.name.replace(".mli.", ".mlo.")
+        )
 
         # each timestep is 20 minutes which corresponds to 1200 seconds
-        ds_target["ptend_t"] = (ds_target["state_t"] - ds_input["state_t"]) / 1200  # T tendency [K/s]
-        ds_target["ptend_q0001"] = (ds_target["state_q0001"] - ds_input["state_q0001"]) / 1200  # Q tendency [kg/kg/s]
+        ds_target["ptend_t"] = (
+            ds_target["state_t"] - ds_input["state_t"]
+        ) / 1200  # T tendency [K/s]
+        ds_target["ptend_q0001"] = (
+            ds_target["state_q0001"] - ds_input["state_q0001"]
+        ) / 1200  # Q tendency [kg/kg/s]
         if self.full_vars:
-            ds_target["ptend_q0002"] = (ds_target["state_q0002"] - ds_input["state_q0002"]) / 1200  # Q tendency [kg/kg/s]
-            ds_target["ptend_q0003"] = (ds_target["state_q0003"] - ds_input["state_q0003"]) / 1200  # Q tendency [kg/kg/s]
-            ds_target["ptend_u"] = (ds_target["state_u"] - ds_input["state_u"]) / 1200  # U tendency [m/s/s]
-            ds_target["ptend_v"] = (ds_target["state_v"] - ds_input["state_v"]) / 1200  # V tendency [m/s/s]
+            ds_target["ptend_q0002"] = (
+                ds_target["state_q0002"] - ds_input["state_q0002"]
+            ) / 1200  # Q tendency [kg/kg/s]
+            ds_target["ptend_q0003"] = (
+                ds_target["state_q0003"] - ds_input["state_q0003"]
+            ) / 1200  # Q tendency [kg/kg/s]
+            ds_target["ptend_u"] = (
+                ds_target["state_u"] - ds_input["state_u"]
+            ) / 1200  # U tendency [m/s/s]
+            ds_target["ptend_v"] = (
+                ds_target["state_v"] - ds_input["state_v"]
+            ) / 1200  # V tendency [m/s/s]
         ds_target = ds_target[self.target_vars]
 
         return ds_input, ds_target
@@ -376,7 +414,7 @@ class LeapLoader:
     def __len__(self):
         return len(self.df)
 
-    def get_data(self, idx, key="path"):
+    def get_data(self, idx, key="path", dtype=np.float32):
         row = self.df.iloc[idx]
         if key == "path":
             ds_input, ds_target = self.get_pair(self.root_folder / row[key])
@@ -384,28 +422,24 @@ class LeapLoader:
             ds_input = self.get_input(self.root_folder / row[key])
             ds_target = None
 
-        # # normalization, scaling
-        # if self.normalize:
-        #     ds_input = (ds_input - self.input_mean) / (self.input_max - self.input_min)
-        #     ds_target = ds_target * self.output_scale
-        # else:
-
-        lat, lon = self.grid_info["lat"].values, self.grid_info["lon"].values
-        lon1, lon2 = np.cos(np.deg2rad(lon)), np.sin(np.deg2rad(lon))
-        lat1, lat2 = np.cos(np.deg2rad(2 * lat)), np.sin(np.deg2rad(2 * lat))
-        area = self.grid_info["area_wgt"].values
-
         ds_input = ds_input.drop(["lat", "lon"])
 
         # stack
         # ds = ds.stack({'batch':{'sample','ncol'}})
         ds_input = ds_input.stack({"batch": {"ncol"}})
-        ds_input = ds_input.to_stacked_array("mlvar", sample_dims=["batch"], name="mli").values
+        ds_input = ds_input.to_stacked_array(
+            "mlvar", sample_dims=["batch"], name="mli"
+        ).values
 
         # dso = dso.stack({'batch':{'sample','ncol'}})
         if ds_target is not None:
             ds_target = ds_target.stack({"batch": {"ncol"}})
-            ds_target = ds_target.to_stacked_array("mlvar", sample_dims=["batch"], name="mlo").values
+            ds_target = ds_target.to_stacked_array(
+                "mlvar", sample_dims=["batch"], name="mlo"
+            ).values
+
+        if self.y_transform and ds_target is not None:
+            ds_target = self.y_transform(ds_target, x=ds_input)
 
         if self.add_static:
             static_data = get_static(self.grid_info)
@@ -413,40 +447,39 @@ class LeapLoader:
 
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
-        if self.y_transform and ds_target is not None:
-            ds_target = self.y_transform(ds_target)
 
-        return ds_input, ds_target
+        if not isinstance(ds_input, dict):
+            ds_input = {"x": ds_input}
+        if not isinstance(ds_target, dict):
+            ds_target = {"y": ds_target}
+        # Check the the keys are not the same
+        assert len(set(ds_input.keys()).intersection(set(ds_target.keys()))) == 0
+
+        return {**ds_input, **ds_target}
 
     def __getitem__(self, idx):
-        if self.multi_step:
-            x0, _ = self.get_data(idx, key="prev_path")
-            x1, y = self.get_data(idx, key="path")
-            x2, _ = self.get_data(idx, key="next_path")
-            return np.concatenate([x0, x1, x2], axis=1), y
-        else:
-            return self.get_data(idx)
+        return self.get_data(idx)
 
 
-def get_idxs(num, num_workers, seed=42):
+def get_idxs(num, num_workers):
     idxs = np.arange(num)
-    np.random.seed(seed)
     idxs = np.random.permutation(idxs)[0 : num - num % num_workers]
     idxs = np.array_split(idxs, num_workers)
     return idxs
 
 
-class IterableDataset(torch.utils.data.IterableDataset):
-    def __init__(self, inner_ds, num_workers=24, seed=42, sample_size=16):
+class IterableDatasetOld(torch.utils.data.IterableDataset):
+    def __init__(self, inner_ds, num_workers=24, sample_size=16):
         self.num_workers = num_workers
         self.total_iterations = -1
-        self.seed = seed
         self.inner_ds = inner_ds
         self.num_samples = len(inner_ds)
         self.sample_size = sample_size
         self.grid_points = 384
         assert self.grid_points % self.sample_size == 0
         self.inner_rep = self.grid_points // self.sample_size
+
+        print("Useing old dataloader!")
 
     def gen(
         self,
@@ -455,38 +488,92 @@ class IterableDataset(torch.utils.data.IterableDataset):
         worker_info = torch.utils.data.get_worker_info()
 
         if worker_info is None:
-            logging.warning("No worker info")
+            print("Worker info is None")
             iter_idx = 0
         else:
             iter_idx = worker_info.id
 
-        idxs = get_idxs(len(self.inner_ds), self.num_workers, self.seed + self.total_iterations)
+        idxs = get_idxs(len(self.inner_ds), self.num_workers)
 
         for idx in idxs[iter_idx]:
             # Each inner dataset contains 384 unique grid points
-            ds_x_inner, ds_y_inner = self.inner_ds[idx]
+            batch = self.inner_ds[idx]
             # ds_x_inner = ds_x_inner.values
             # ds_y_inner = ds_y_inner.values
 
             random_sample = np.random.permutation(self.grid_points)
             for n in range(self.inner_rep):
-                ds_x = ds_x_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
-                ds_y = ds_y_inner[random_sample[n * self.sample_size : (n + 1) * self.sample_size]]
-                yield ds_x, ds_y
+                s = random_sample[n * self.sample_size : (n + 1) * self.sample_size]
+                yield {k: v[s] for k, v in batch.items()}
 
     def __iter__(self):
         return self.gen()
 
 
+class InnerDataLoader(torch.utils.data.IterableDataset):
+    def __init__(self, inner_ds, num_workers=12, seed=42, batch_size=128):
+        self.inner_ds = inner_ds
+        self.num_workers = num_workers
+        self.seed = seed
+        self.gen = np.random.RandomState(seed)
+        self.dl = DataLoader(
+            inner_ds,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            batch_size=num_workers,
+            prefetch_factor=2,
+            collate_fn=concat_collate,
+            shuffle=True,
+        )
+        assert (384 * num_workers) % batch_size == 0
+
+        self.batch_size = batch_size
+        self.dl_iter = None
+
+    def __iter__(self):
+        print("Starting generator")
+        self.dl_iter = iter(self.dl)
+
+        return self.generator()
+
+    def generator(self):
+        try:
+            while True:
+                assert self.dl_iter is not None
+                batch = next(self.dl_iter)
+                in_bs = list(batch.values())[0].shape[0]
+
+                sample = self.gen.permutation(in_bs)
+                sample = sample.reshape(
+                    -1,
+                    self.batch_size,
+                )
+
+                for i in range(sample.shape[0]):
+                    yield {k: v[sample[i]] for k, v in batch.items()}
+        except StopIteration:
+            pass
+
+    def __len__(self):
+        return len(self.inner_ds) - (len(self.inner_ds) % self.batch_size)
+
+    # reset
+    def reset(self):
+        self.dl_iter = iter(self.dl)
+
+
 def concat_collate(batch):
-    x = [torch.from_numpy(b[0]) for b in batch]
-    y = [torch.from_numpy(b[1]) for b in batch]
-    x = torch.cat(x, dim=0)
-    y = torch.cat(y, dim=0)
-    return x, y
+    b_all = defaultdict(list)
+
+    for b in batch:
+        for k, v in b.items():
+            b_all[k].append(torch.from_numpy(v))
+
+    return {k: torch.cat(v, dim=0) for k, v in b_all.items()}
 
 
-def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
+def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
     x_norm, y_norm = norm.get_stats(loader_cfg, data_cfg)
 
     df_index = pd.read_parquet(loader_cfg.index_path)
@@ -500,9 +587,10 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
         root_folder=Path(loader_cfg.root_folder),
         grid_info_path=loader_cfg.grid_info_path,
         df=df_index_tr,
-        x_transform=x_norm,
-        y_transform=y_norm,
+        x_transform=x_norm if loader_cfg.apply_norm else None,
+        y_transform=y_norm if loader_cfg.apply_norm else None,
     )
+
 
     if loader_cfg.use_iterable_ds:
         train_ds = IterableDataset(inner_train_ds, num_workers=24)
@@ -530,9 +618,68 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
         root_folder=Path(loader_cfg.root_folder),
         grid_info_path=loader_cfg.grid_info_path,
         df=df_index_val,
-        x_transform=x_norm,
-        y_transform=y_norm,
+        x_transform=x_norm if loader_cfg.apply_norm else None,
+        y_transform=y_norm if loader_cfg.apply_norm else None,
     )
+
+    return inner_train_ds, valid_ds
+
+
+def single_batch_collate(batch):
+    assert len(batch) == 1
+    return batch[0]
+
+
+def setup_dataloaders(
+    loader_cfg: config.LoaderConfig,
+    data_cfg: config.DataConfig,
+):
+    inner_train_ds, valid_ds = get_datasets(loader_cfg, data_cfg)
+
+    if loader_cfg.use_iterable_train:
+        if loader_cfg.use_old_dataloader:
+            train_ds = IterableDatasetOld(
+                inner_ds=inner_train_ds,
+                num_workers=loader_cfg.num_workers,
+                sample_size=16,
+            )
+            dl_kwargs = dict(
+                num_workers=loader_cfg.num_workers,
+                batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+                collate_fn=concat_collate,
+                pin_memory=False,
+            )
+        else:
+
+            train_ds = InnerDataLoader(
+                inner_train_ds, num_workers=12, batch_size=loader_cfg.batch_size
+            )
+
+            dl_kwargs = dict(
+                num_workers=0,
+                batch_size=1,
+                collate_fn=single_batch_collate,
+                pin_memory=False,
+            )
+    else:
+        train_ds = inner_train_ds
+        dl_kwargs = dict(
+            num_workers=8, batch_size=1, pin_memory=True, shuffle=True
+        )  # effective batch size -> 384
+
+    train_dl = torch.utils.data.DataLoader(train_ds, **dl_kwargs)
+
+    batch = next(iter(train_dl))
+    for k, v in batch.items():
+        print(f"{k}: {v.shape}")
+        if v.dtype == torch.float32:
+            print(f"{k} std: {v.std()}")
+
+        print(f"{k} max: {v.max()}")
+        print(f"{k} min: {v.min()}")
+
+    if isinstance(train_ds, InnerDataLoader):
+        train_ds.reset()
 
     # effective batch size -> 384
     valid_dl = torch.utils.data.DataLoader(
@@ -542,6 +689,7 @@ def setup_dataloaders(loader_cfg: config.LoaderConfig, data_cfg: config.DataConf
         collate_fn=concat_collate,
         pin_memory=True,
         shuffle=False,
+        drop_last=False
     )
 
     return train_ds, valid_ds, train_dl, valid_dl
