@@ -394,7 +394,6 @@ def set_seed(seed=42):
     torch.backends.cudnn.deterministic = True
     # torch.backends.cudnn.benchmark = False
 
-
 def load_matching_weights(model, checkpoint_path):
     # Load the state dict from the checkpoint
     checkpoint = torch.load(checkpoint_path)["state_dict"]

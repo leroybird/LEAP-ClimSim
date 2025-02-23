@@ -441,6 +441,10 @@ class LeapLoader:
         if self.y_transform and ds_target is not None:
             ds_target = self.y_transform(ds_target, x=ds_input)
 
+        if self.add_static:
+            static_data = get_static(self.grid_info)
+            ds_input = np.concatenate([ds_input, static_data], axis=1)
+
         if self.x_transform:
             ds_input = self.x_transform(ds_input)
 
@@ -587,6 +591,29 @@ def get_datasets(loader_cfg: config.LoaderConfig, data_cfg: config.DataConfig):
         y_transform=y_norm if loader_cfg.apply_norm else None,
     )
 
+
+    if loader_cfg.use_iterable_ds:
+        train_ds = IterableDataset(inner_train_ds, num_workers=24)
+        train_dl = torch.utils.data.DataLoader(
+            train_ds,
+            num_workers=24,
+            batch_size=loader_cfg.batch_size // loader_cfg.sample_size,
+            collate_fn=concat_collate,
+            pin_memory=True,
+            shuffle=loader_cfg.random_shuffle,
+        )
+    else:
+        train_ds = inner_train_ds
+        train_dl = torch.utils.data.DataLoader(
+            train_ds,
+            num_workers=loader_cfg.num_workers,
+            batch_size=loader_cfg.batch_size,
+            pin_memory=True,
+            shuffle=loader_cfg.random_shuffle,
+        )
+    x, y = next(iter(train_dl))
+    print(f"x.shape: {x.shape}, y.shape: {y.shape}, x_std: {x.std()}, y_std: {y.std()}")
+
     valid_ds = LeapLoader(
         root_folder=Path(loader_cfg.root_folder),
         grid_info_path=loader_cfg.grid_info_path,
@@ -655,14 +682,14 @@ def setup_dataloaders(
         train_ds.reset()
 
     # effective batch size -> 384
-    valid_loader = torch.utils.data.DataLoader(
+    valid_dl = torch.utils.data.DataLoader(
         valid_ds,
         num_workers=12,
         batch_size=1,
         collate_fn=concat_collate,
         pin_memory=True,
         shuffle=False,
-        drop_last=False,
+        drop_last=False
     )
 
-    return train_dl, valid_loader
+    return train_ds, valid_ds, train_dl, valid_dl

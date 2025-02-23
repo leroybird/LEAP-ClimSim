@@ -32,7 +32,6 @@ class EvalLoader(Dataset):
     def __len__(self):
         return self.data_dict["x"].shape[0]
 
-
 def get_predictions(model, test_loader, targets={"reg"}):
     trainer = L.Trainer()
     preds = trainer.predict(
@@ -51,6 +50,7 @@ def get_predictions(model, test_loader, targets={"reg"}):
     # preds = np.concatenate([p.numpy().astype(np.float32) for p in preds])
     # print(preds.shape)
     return output
+
 
 
 def save_predictions(preds, output_path, test_df, norm_y, y_names):
@@ -175,6 +175,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg_loader = config.LoaderConfig()
+    if args.ds_type == "test":
+        assert args.test_df is not None
+    else:
+        cfg_loader.use_iterable_ds = False
+        cfg_loader.batch_size = 1
+        cfg_loader.random_shuffle = False
+        cfg_loader.num_workers = 4
+
     cfg_data = config.get_data_config(cfg_loader)
     cfg_loader.use_iterable_train = False
 
@@ -185,7 +193,7 @@ if __name__ == "__main__":
         resume_path=args.model,
         setup_dataloader=False,
     )
-
+    
     norm_x, norm_y = norm.get_stats(cfg_loader, cfg_data)
 
     output_dir = args.output
